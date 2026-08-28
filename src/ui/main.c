@@ -18,9 +18,11 @@
 #include "core/abs_api.h"
 #include "core/config.h"
 #include "core/paths.h"
+#include "core/manifest.h"
 #include "core/state.h"
 #include "core/version.h"
 #include "ui/covers.h"
+#include "ui/downloader.h"
 #include "ui/log.h"
 #include "ui/net.h"
 
@@ -40,7 +42,8 @@ typedef enum {
     SCREEN_SETUP,
     SCREEN_LIBRARIES,
     SCREEN_ITEMS,
-    SCREEN_DETAIL
+    SCREEN_DETAIL,
+    SCREEN_DOWNLOAD
 } screen_id;
 
 typedef struct {
@@ -70,6 +73,7 @@ enum { ACT_NONE = 0, ACT_EDIT_SERVER, ACT_EDIT_ADMIN_USER, ACT_EDIT_ADMIN_PASS,
        ACT_EDIT_TARGET_USER, ACT_SIGN_IN, ACT_OPEN_SETUP, ACT_SHOW_LIBRARIES,
        ACT_PREV_PAGE, ACT_NEXT_PAGE, ACT_BACK_TO_ITEMS, ACT_GO_BACK,
        ACT_SCROLL_UP, ACT_SCROLL_DOWN,
+       ACT_DOWNLOAD, ACT_CANCEL_DL, ACT_PLAY, ACT_DELETE,
        ACT_PICK_LIBRARY_BASE = 1000,     /* + index into `libraries` */
        ACT_PICK_ITEM_BASE    = 2000 };   /* + index into `items` */
 
@@ -106,6 +110,8 @@ static int cover_load_index;        /* progressive load cursor */
 static abs_state restore;
 static int restoring;
 
+static abs_manifest manifest;
+
 static void draw_current_screen(void);
 static void fetch_libraries(void);
 static void autofetch_cb(void);
@@ -114,6 +120,7 @@ static void fetch_detail(const char *item_id);
 static void cover_tick_cb(void);
 static void start_cover_loading(void);
 static void save_state(void);
+static void dl_pump_cb(void);
 
 /* ---------------------------------------------------------------- config -- */
 
@@ -188,6 +195,34 @@ static void save_state(void)
     fwrite(buf, 1, n, f);
     fclose(f);
     abs_log("state saved: screen=%d lib=%s page=%d", st.screen, st.library_id, st.page);
+}
+
+static void manifest_load(void)
+{
+    memset(&manifest, 0, sizeof manifest);
+
+    FILE *f = fopen(ABS_MANIFEST_PATH, "r");
+    if (f == NULL) return;
+
+    static char buf[64 * 1024];
+    size_t n = fread(buf, 1, sizeof buf - 1, f);
+    buf[n] = '\0';
+    fclose(f);
+
+    abs_manifest_parse(buf, &manifest);
+    abs_log("manifest: %d downloaded book(s)", manifest.count);
+}
+
+static void manifest_save(void)
+{
+    static char buf[64 * 1024];
+    size_t n = abs_manifest_serialize(&manifest, buf, sizeof buf);
+    if (n == 0) { abs_log("manifest too large to write"); return; }
+
+    FILE *f = fopen(ABS_MANIFEST_PATH, "w");
+    if (f == NULL) { abs_log("could not write manifest"); return; }
+    fwrite(buf, 1, n, f);
+    fclose(f);
 }
 
 static void load_state(void)
@@ -551,7 +586,7 @@ static void draw_detail_screen(void)
 
     /* Description fills whatever is left, scrolled with the page buttons. */
     int desc_top = y;
-    int desc_h = screen_h - row_h * 2 - desc_top;
+    int desc_h = screen_h - row_h * 3 - desc_top;
     if (desc_h > 0 && detail.description[0]) {
         const char *text = detail.description;
         int len = (int)strlen(text);
@@ -573,7 +608,132 @@ static void draw_detail_screen(void)
         add_row(split, desc_top + desc_h - split, ACT_SCROLL_DOWN);
     }
 
+    /* Actions sit above the description so they are always reachable without
+     * scrolling. */
+    int act_y = screen_h - row_h * 2;
+    const abs_download *have = abs_manifest_find(&manifest, detail.id);
+    int half = (screen_w - margin * 2 - margin / 2) / 2;
+
+    if (have != NULL) {
+        DrawRectRound(margin, act_y, half, row_h, row_h / 4, BLACK);
+        SetFont(font_body, BLACK);
+        DrawTextRect(margin, act_y + row_h / 4, half, row_h / 2, "Play", ALIGN_CENTER);
+        add_row(act_y, row_h, ACT_PLAY);
+
+        DrawRectRound(margin + half + margin / 2, act_y, half, row_h, row_h / 4, DGRAY);
+        DrawTextRect(margin + half + margin / 2, act_y + row_h / 4, half, row_h / 2,
+                     "Delete", ALIGN_CENTER);
+        add_row(act_y, row_h, ACT_DELETE);
+    } else if (detail.track_count > 0) {
+        char label[64], sz[32];
+        abs_format_size(detail.tracks_total_size, sz, sizeof sz);
+        snprintf(label, sizeof label, "Download  (%s)", sz);
+
+        DrawRectRound(margin, act_y, screen_w - margin * 2, row_h, row_h / 4, BLACK);
+        SetFont(font_body, BLACK);
+        DrawTextRect(margin, act_y + row_h / 4, screen_w - margin * 2, row_h / 2,
+                     label, ALIGN_CENTER);
+        add_row(act_y, row_h, ACT_DOWNLOAD);
+    }
+
     draw_footer("Tap lower half to scroll  |  < to go back");
+    FullUpdate();
+}
+
+/*
+ * The download screen is split in two.
+ *
+ * Only the counter, bar and byte total change while a transfer runs, so they
+ * live in their own strip that is repainted with PartialUpdate. Repainting
+ * the whole screen would mean a full e-ink refresh -- a visible flash -- every
+ * second for the length of a 300 MB download.
+ */
+static int dl_dyn_y, dl_dyn_h;
+
+static void draw_download_dynamic(int flush)
+{
+    const abs_dl_status *st = abs_dl_status_get();
+    char line[256], done_s[32], total_s[32];
+
+    if (dl_dyn_h <= 0) return;
+
+    FillArea(0, dl_dyn_y, screen_w, dl_dyn_h, WHITE);
+
+    int y = dl_dyn_y;
+
+    SetFont(font_hint, DGRAY);
+    snprintf(line, sizeof line, "File %d of %d  -  %s",
+             st->track_index + 1, st->track_count, st->current_name);
+    DrawTextRect(margin, y, screen_w - margin * 2, row_h / 2, line,
+                 ALIGN_CENTER | DOTS);
+    y += row_h;
+
+    int bar_w = screen_w - margin * 2;
+    int bar_h = row_h / 2;
+    int pct = 0;
+    if (st->total_bytes > 0) {
+        pct = (int)((st->done_bytes * 100) / st->total_bytes);
+        if (pct > 100) pct = 100;
+    }
+
+    DrawRect(margin, y, bar_w, bar_h, BLACK);
+    if (pct > 0) FillArea(margin + 2, y + 2, (bar_w - 4) * pct / 100, bar_h - 4, BLACK);
+    y += bar_h + row_h / 3;
+
+    abs_format_size(st->done_bytes, done_s, sizeof done_s);
+    abs_format_size(st->total_bytes, total_s, sizeof total_s);
+    snprintf(line, sizeof line, "%s of %s  (%d%%)", done_s, total_s, pct);
+    SetFont(font_body, BLACK);
+    DrawTextRect(margin, y, screen_w - margin * 2, row_h / 2, line, ALIGN_CENTER);
+
+    if (flush) PartialUpdate(0, dl_dyn_y, screen_w, dl_dyn_h);
+}
+
+static void draw_download_screen(void)
+{
+    const abs_dl_status *st = abs_dl_status_get();
+
+    ClearScreen();
+    row_count = 0;
+
+    draw_header("Downloading");
+
+    int y = header_h + row_h;
+
+    SetFont(font_body, BLACK);
+    DrawTextRect(margin, y, screen_w - margin * 2, row_h, detail.title,
+                 ALIGN_CENTER | DOTS);
+    y += row_h;
+
+    /* Everything that changes during the transfer lives in this strip. */
+    dl_dyn_y = y;
+    dl_dyn_h = row_h * 2 + row_h / 2;
+    draw_download_dynamic(0);
+    y += dl_dyn_h + row_h / 3;
+
+    if (st->state == DL_RUNNING) {
+        DrawRectRound(margin, y, screen_w - margin * 2, row_h, row_h / 4, BLACK);
+        SetFont(font_body, BLACK);
+        DrawTextRect(margin, y + row_h / 4, screen_w - margin * 2, row_h / 2,
+                     "Cancel", ALIGN_CENTER);
+        add_row(y, row_h, ACT_CANCEL_DL);
+    } else {
+        SetFont(font_hint, BLACK);
+        DrawTextRect(margin, y, screen_w - margin * 2, row_h * 2,
+                     st->message, ALIGN_CENTER);
+        y += row_h * 2;
+
+        DrawRectRound(margin, y, screen_w - margin * 2, row_h, row_h / 4, BLACK);
+        SetFont(font_body, BLACK);
+        DrawTextRect(margin, y + row_h / 4, screen_w - margin * 2, row_h / 2,
+                     "Back to book", ALIGN_CENTER);
+        add_row(y, row_h, ACT_BACK_TO_ITEMS);
+    }
+
+    SetFont(font_hint, DGRAY);
+    DrawTextRect(margin, screen_h - row_h, screen_w - margin * 2, row_h / 2,
+                 "Sleep is held off while downloading", ALIGN_CENTER | DOTS);
+
     FullUpdate();
 }
 
@@ -584,6 +744,7 @@ static void draw_current_screen(void)
     case SCREEN_LIBRARIES: draw_libraries_screen(); break;
     case SCREEN_ITEMS:     draw_items_screen();     break;
     case SCREEN_DETAIL:    draw_detail_screen();    break;
+    case SCREEN_DOWNLOAD:  draw_download_screen();  break;
     }
 }
 
@@ -1042,6 +1203,51 @@ static void start_cover_loading(void)
     }
 }
 
+/*
+ * Drive the transfer from a timer, repainting the progress bar as it moves.
+ *
+ * The pump itself is non-blocking (curl_multi), so the event loop keeps
+ * running between ticks -- which is what makes Cancel work at all.
+ */
+static void dl_pump_cb(void)
+{
+    static int repaint_counter;
+
+    int still_running = abs_dl_pump();
+    const abs_dl_status *st = abs_dl_status_get();
+
+    if (still_running) {
+        /* Repaint about once a second: the bar has to move, but a full e-ink
+         * refresh every 100ms would make the device unusable. */
+        if (++repaint_counter >= 10) {
+            repaint_counter = 0;
+            if (current_screen == SCREEN_DOWNLOAD) draw_download_dynamic(1);
+        }
+        SetWeakTimer("abs_dl", dl_pump_cb, 100);
+        return;
+    }
+
+    repaint_counter = 0;
+
+    if (st->state == DL_DONE) {
+        abs_download entry;
+        memset(&entry, 0, sizeof entry);
+        snprintf(entry.item_id, sizeof entry.item_id, "%s", detail.id);
+        abs_manifest_dir_for(detail.author, detail.title, entry.dir, sizeof entry.dir);
+        snprintf(entry.title, sizeof entry.title, "%s", detail.title);
+        snprintf(entry.author, sizeof entry.author, "%s", detail.author);
+        entry.duration = detail.duration;
+        entry.size = st->done_bytes;
+        entry.track_count = detail.track_count;
+
+        abs_manifest_put(&manifest, &entry);
+        manifest_save();
+        abs_log("recorded download: %s -> %s", entry.item_id, entry.dir);
+    }
+
+    if (current_screen == SCREEN_DOWNLOAD) draw_current_screen();
+}
+
 static void autofetch_cb(void)
 {
     abs_log("autofetch timer fired");
@@ -1118,6 +1324,12 @@ static void target_user_entered(char *text)
 static void go_back(void)
 {
     switch (current_screen) {
+    case SCREEN_DOWNLOAD:
+        /* Leaving the screen does not stop the transfer; it keeps running on
+         * its timer and the manifest is updated when it finishes. */
+        current_screen = SCREEN_DETAIL;
+        draw_current_screen();
+        break;
     case SCREEN_DETAIL:
         current_screen = SCREEN_ITEMS;
         draw_current_screen();
@@ -1178,6 +1390,83 @@ static void handle_action(int action)
         draw_current_screen();
         break;
 
+    case ACT_DOWNLOAD: {
+        char dir[ABS_MAX_DIR];
+        if (abs_manifest_dir_for(detail.author, detail.title, dir, sizeof dir) == 0) {
+            Message(ICON_WARNING, "Cannot download",
+                    "That book's title is too long for a folder name.", 3000);
+            break;
+        }
+
+        current_screen = SCREEN_DOWNLOAD;
+        draw_current_screen();
+
+        if (abs_dl_start(&config, &detail, dir)) {
+            SetWeakTimer("abs_dl", dl_pump_cb, 100);
+        }
+        draw_current_screen();
+        break;
+    }
+
+    case ACT_CANCEL_DL:
+        abs_dl_cancel();
+        ClearTimerByName("abs_dl");
+        draw_current_screen();
+        break;
+
+    case ACT_PLAY: {
+        /*
+         * Handing a file to the firmware player terminates this app -- that is
+         * how the platform works, not a failure. Save first so relaunching
+         * comes back here, and let the player own the screen.
+         */
+        const abs_download *have = abs_manifest_find(&manifest, detail.id);
+        if (have == NULL) break;
+
+        char safe_name[ABS_MAX_NAME];
+        char path[ABS_MAX_DIR + ABS_MAX_NAME + 8];
+        abs_sanitize_component(detail.track_count > 0 ? detail.tracks[0].filename : "",
+                               safe_name, sizeof safe_name);
+        snprintf(path, sizeof path, "%s/%s", have->dir, safe_name);
+
+        /*
+         * OpenBook routes through the firmware's file-handler association, so
+         * an .m4b lands in the audiobook app -- at that book, with its
+         * chapters and its own saved position. PlayFile goes to the music
+         * player instead, which just dropped us on the home screen.
+         *
+         * Either way this app is terminated, so save first.
+         */
+        const char *handler = GetFileHandler(path);
+        abs_log("handing off: %s (handler: %s)", path,
+                handler ? handler : "(none)");
+
+        save_state();
+        manifest_save();
+
+        int rc = OpenBook(path, NULL, 0);
+        abs_log("OpenBook -> %d", rc);
+
+        if (rc <= 0) {
+            /* Fall back rather than leaving the user with a dead button. */
+            abs_log("OpenBook failed, falling back to PlayFile");
+            PlayFile(path);
+        }
+        break;
+    }
+
+    case ACT_DELETE: {
+        const abs_download *have = abs_manifest_find(&manifest, detail.id);
+        if (have == NULL) break;
+        abs_log("forgetting download %s", have->item_id);
+        /* Only the record is dropped here; the audio stays on the device for
+         * the stock player, and the user can delete it from the library. */
+        abs_manifest_remove(&manifest, detail.id);
+        manifest_save();
+        draw_current_screen();
+        break;
+    }
+
     case ACT_PREV_PAGE:
         if (item_page > 0) {
             item_page--;
@@ -1191,7 +1480,7 @@ static void handle_action(int action)
         break;
 
     case ACT_BACK_TO_ITEMS:
-        current_screen = SCREEN_ITEMS;
+        current_screen = SCREEN_DETAIL;
         draw_current_screen();
         break;
 
@@ -1307,6 +1596,7 @@ static int main_handler(int type, int par1, int par2)
             config_load();
             abs_covers_init();
             load_state();
+            manifest_load();
             abs_log("config loaded in %lums", abs_now_ms() - t);
         }
 

@@ -8,6 +8,7 @@
 #include "core/abs_api.h"
 #include "core/config.h"
 #include "core/paths.h"
+#include "core/manifest.h"
 #include "core/state.h"
 #include "core/version.h"
 
@@ -525,6 +526,142 @@ static void test_state(void)
     check_int("tiny buffer", (long)abs_state_serialize(&in, tiny, sizeof tiny), 0);
 }
 
+static void test_parse_tracks(void)
+{
+    abs_item_detail d;
+
+    printf("audioFiles parsing:\n");
+
+    const char *body =
+        "{\"id\":\"li_1\",\"media\":{\"duration\":100,"
+        "\"metadata\":{\"title\":\"Book\"},"
+        "\"audioFiles\":["
+        "{\"index\":1,\"ino\":\"12345\",\"duration\":60.5,"
+        "\"metadata\":{\"filename\":\"01 - Intro.mp3\",\"size\":1048576}},"
+        "{\"index\":2,\"ino\":67890,\"duration\":40,"
+        "\"metadata\":{\"filename\":\"02 - Rest.mp3\",\"size\":2097152}}"
+        "]}}";
+
+    check_int("parses", abs_parse_item_detail(body, &d), 1);
+    check_int("track count", d.track_count, 2);
+    check_str("first ino (string)", d.tracks[0].ino, "12345");
+    check_str("first filename", d.tracks[0].filename, "01 - Intro.mp3");
+    /* ino comes back as a number on some payloads and a string on others. */
+    check_str("second ino (number)", d.tracks[1].ino, "67890");
+    check_int("total size summed", (long)d.tracks_total_size, 3145728);
+
+    /* A file with no ino cannot be fetched, so it must not be listed. */
+    check_int("no-ino file skipped",
+              abs_parse_item_detail("{\"id\":\"x\",\"media\":{\"metadata\":{\"title\":\"T\"},"
+                                    "\"audioFiles\":[{\"index\":1}]}}", &d), 1);
+    check_int("skipped", d.track_count, 0);
+
+    /* An ebook-only item simply has no tracks. */
+    check_int("no audioFiles key",
+              abs_parse_item_detail("{\"id\":\"x\",\"media\":{\"metadata\":{\"title\":\"T\"}}}", &d), 1);
+    check_int("zero tracks", d.track_count, 0);
+}
+
+static void test_download_url(void)
+{
+    abs_config cfg;
+    char buf[1024];
+
+    printf("download URL:\n");
+
+    memset(&cfg, 0, sizeof cfg);
+    snprintf(cfg.server, sizeof cfg.server, "%s", "https://abs.example.com");
+    snprintf(cfg.token, sizeof cfg.token, "%s", "tok");
+
+    abs_url_track_download(&cfg, "li_1", "12345", buf, sizeof buf);
+    check_str("by inode, token in query", buf,
+              "https://abs.example.com/api/items/li_1/file/12345/download?token=tok");
+}
+
+static void test_manifest(void)
+{
+    abs_manifest m;
+    abs_download e;
+    char buf[4096];
+
+    printf("manifest:\n");
+
+    memset(&m, 0, sizeof m);
+    memset(&e, 0, sizeof e);
+    snprintf(e.item_id, sizeof e.item_id, "%s", "li_1");
+    snprintf(e.dir, sizeof e.dir, "%s", "/mnt/ext1/Audio Books/Frank Herbert - Dune");
+    snprintf(e.title, sizeof e.title, "%s", "Dune");
+    snprintf(e.author, sizeof e.author, "%s", "Frank Herbert");
+    e.duration = 12240; e.size = 327155712; e.track_count = 1;
+
+    check_int("put", abs_manifest_put(&m, &e), 1);
+    check_int("count", m.count, 1);
+
+    /* Same id replaces rather than duplicating. */
+    e.track_count = 3;
+    abs_manifest_put(&m, &e);
+    check_int("replace not duplicate", m.count, 1);
+    check_int("updated field", m.items[0].track_count, 3);
+
+    size_t n = abs_manifest_serialize(&m, buf, sizeof buf);
+    check_int("serialized", n > 0, 1);
+
+    abs_manifest out;
+    abs_manifest_parse(buf, &out);
+    check_int("round-trip count", out.count, 1);
+    check_str("dir survives spaces", out.items[0].dir,
+              "/mnt/ext1/Audio Books/Frank Herbert - Dune");
+    check_str("title", out.items[0].title, "Dune");
+    check_int("size", (long)out.items[0].size, 327155712);
+
+    /* The lookup sync depends on: firmware path -> ABS item. */
+    const abs_download *hit = abs_manifest_find_by_path(&out,
+        "/mnt/ext1/Audio Books/Frank Herbert - Dune/Dune.m4b");
+    check_int("found by path", hit != NULL, 1);
+    if (hit) check_str("mapped to item", hit->item_id, "li_1");
+
+    /* A directory that merely shares a prefix must not match. */
+    check_int("prefix is not containment",
+              abs_manifest_find_by_path(&out,
+                  "/mnt/ext1/Audio Books/Frank Herbert - Dune Messiah/x.mp3") == NULL, 1);
+
+    check_int("find by id", abs_manifest_find(&out, "li_1") != NULL, 1);
+    check_int("missing id", abs_manifest_find(&out, "nope") == NULL, 1);
+    check_int("remove", abs_manifest_remove(&out, "li_1"), 1);
+    check_int("empty after remove", out.count, 0);
+
+    /* Junk lines must not take the whole file down with them. */
+    abs_manifest_parse("# comment\n\nbroken-line\nli_9\t/dir\tT\tA\t1\t2\t3\n", &out);
+    check_int("survives junk", out.count, 1);
+    check_str("recovered id", out.items[0].item_id, "li_9");
+
+    char tiny[16];
+    check_int("tiny buffer refuses", (long)abs_manifest_serialize(&m, tiny, sizeof tiny), 0);
+}
+
+static void test_manifest_dir(void)
+{
+    char buf[ABS_MAX_DIR];
+
+    printf("download directory:\n");
+
+    abs_manifest_dir_for("Frank Herbert", "Dune", buf, sizeof buf);
+    check_str("author - title", buf, "/mnt/ext1/Audio Books/Frank Herbert - Dune");
+
+    /* Must land under the path the firmware actually scans. */
+    check_int("under Audio Books", strncmp(buf, "/mnt/ext1/Audio Books/", 22) == 0, 1);
+
+    abs_manifest_dir_for("", "Solo Title", buf, sizeof buf);
+    check_str("no author", buf, "/mnt/ext1/Audio Books/Solo Title");
+
+    abs_manifest_dir_for("A/B: C", "Title?", buf, sizeof buf);
+    check_str("sanitized", buf, "/mnt/ext1/Audio Books/A B C - Title");
+
+    char small[24];
+    check_int("refuses overflow",
+              (long)abs_manifest_dir_for("Frank Herbert", "Dune", small, sizeof small), 0);
+}
+
 int main(void)
 {
     test_sanitize();
@@ -545,6 +682,10 @@ int main(void)
     test_parse_items();
     test_parse_item_detail();
     test_state();
+    test_parse_tracks();
+    test_download_url();
+    test_manifest();
+    test_manifest_dir();
 
     if (failures) {
         printf("\n%d failure(s)\n", failures);

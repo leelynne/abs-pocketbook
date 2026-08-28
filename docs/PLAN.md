@@ -182,6 +182,12 @@ included — 25 chapter rows were extracted from the test book.
 library: the firmware plainly uses SQLite, but its rootfs is not visible over USB so we
 cannot confirm the runtime `.so` is present, and 800 KB removes the doubt entirely.
 
+**Hand off with `OpenBook()`, not `PlayFile()`.** `PlayFile()` routes to the music
+player and simply drops the user on the home screen. `OpenBook(path, NULL, 0)` goes
+through the firmware's file-handler association (`GetFileHandler`), so an `.m4b` opens in
+the audiobook app at that book, with its chapters and its own saved position. Both
+terminate this app, so state and manifest are written first either way.
+
 ### The design this implies
 
 ```

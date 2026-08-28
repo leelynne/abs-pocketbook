@@ -7,6 +7,7 @@
 #define ABS_APP_DIR    "/mnt/ext1/applications/ABSClient"
 #define ABS_CONFIG_PATH ABS_APP_DIR "/abs_client.cfg"
 #define ABS_STATE_PATH  ABS_APP_DIR "/abs_state.cfg"
+#define ABS_MANIFEST_PATH ABS_APP_DIR "/downloads.tsv"
 #define ABS_LOG_PATH    ABS_APP_DIR "/abs_client.log"
 /* Presence of this file turns on verbose logging (OPDSClient convention). */
 #define ABS_LOG_TRIGGER ABS_APP_DIR "/LOGTRIGGER.TXT"

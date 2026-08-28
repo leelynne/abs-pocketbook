@@ -66,6 +66,17 @@ typedef struct {
     int    num_tracks;
 } abs_item;
 
+#define ABS_MAX_TRACKS 64
+
+/* One downloadable audio file of a book. */
+typedef struct {
+    char      ino[ABS_MAX_ID];        /* files are addressed by inode, not index */
+    char      filename[ABS_MAX_NAME];
+    long long size;                   /* bytes */
+    double    duration;               /* seconds */
+    int       index;                  /* 1-based track order from the server */
+} abs_track;
+
 /* Everything the detail screen shows. Fetched one at a time. */
 typedef struct {
     char      id[ABS_MAX_ID];
@@ -80,6 +91,10 @@ typedef struct {
     int       num_tracks;
     int       num_chapters;
     char      description[ABS_MAX_DESC];
+
+    abs_track tracks[ABS_MAX_TRACKS];
+    int       track_count;
+    long long tracks_total_size;      /* sum, for "download 312 MB?" */
 } abs_item_detail;
 
 /*
@@ -93,6 +108,16 @@ size_t abs_url_library_items(const abs_config *cfg, const char *library_id,
 /* GET /api/items/:id?expanded=1 */
 size_t abs_url_item(const abs_config *cfg, const char *item_id,
                     char *out, size_t out_size);
+
+/*
+ * Download URL for one audio file.
+ *
+ * The token goes in the query string: this URL is handed to a plain transfer
+ * with no header plumbing, and ABS accepts ?token= as readily as a bearer
+ * header (server/Auth.js builds its JWT strategy with both extractors).
+ */
+size_t abs_url_track_download(const abs_config *cfg, const char *item_id,
+                              const char *ino, char *out, size_t out_size);
 
 /*
  * Parse a page of library items. Returns the count written, or -1 on a body

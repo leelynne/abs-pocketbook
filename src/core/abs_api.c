@@ -268,6 +268,13 @@ size_t abs_url_item(const abs_config *cfg, const char *item_id,
                      cfg->server, item_id);
 }
 
+size_t abs_url_track_download(const abs_config *cfg, const char *item_id,
+                              const char *ino, char *out, size_t out_size)
+{
+    return write_url(out, out_size, "%s/api/items/%s/file/%s/download?token=%s",
+                     cfg->server, item_id, ino, cfg->token);
+}
+
 static double number_field(const cJSON *obj, const char *key)
 {
     const cJSON *item = cJSON_GetObjectItemCaseSensitive(obj, key);
@@ -383,6 +390,46 @@ int abs_parse_item_detail(const char *json, abs_item_detail *out)
             if (cJSON_IsString(desc) && desc->valuestring != NULL) {
                 abs_strip_html(desc->valuestring, out->description,
                                sizeof out->description);
+            }
+        }
+    }
+
+    /* Audio files, in track order -- what M3 downloads. */
+    if (cJSON_IsObject(media)) {
+        const cJSON *files = cJSON_GetObjectItemCaseSensitive(media, "audioFiles");
+        if (cJSON_IsArray(files)) {
+            const cJSON *entry = NULL;
+            cJSON_ArrayForEach(entry, files) {
+                if (out->track_count >= ABS_MAX_TRACKS) break;
+                if (!cJSON_IsObject(entry)) continue;
+
+                abs_track t;
+                memset(&t, 0, sizeof t);
+
+                /* ino is a number in some payloads and a string in others. */
+                const cJSON *ino = cJSON_GetObjectItemCaseSensitive(entry, "ino");
+                if (cJSON_IsString(ino) && ino->valuestring != NULL) {
+                    snprintf(t.ino, sizeof t.ino, "%s", ino->valuestring);
+                } else if (cJSON_IsNumber(ino)) {
+                    snprintf(t.ino, sizeof t.ino, "%lld", (long long)ino->valuedouble);
+                }
+                if (t.ino[0] == '\0') continue;   /* cannot be fetched */
+
+                t.index    = (int)number_field(entry, "index");
+                t.duration = number_field(entry, "duration");
+
+                const cJSON *meta = cJSON_GetObjectItemCaseSensitive(entry, "metadata");
+                if (cJSON_IsObject(meta)) {
+                    copy_string_field(meta, "filename", t.filename, sizeof t.filename);
+                    t.size = (long long)number_field(meta, "size");
+                }
+                if (t.filename[0] == '\0') {
+                    snprintf(t.filename, sizeof t.filename, "track_%02d.mp3",
+                             out->track_count + 1);
+                }
+
+                out->tracks_total_size += t.size;
+                out->tracks[out->track_count++] = t;
             }
         }
     }
