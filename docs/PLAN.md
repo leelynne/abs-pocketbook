@@ -240,6 +240,29 @@ before any request. Settings screen with `OpenKeyboard()` for server URL and API
 persisted to `abs_client.cfg`. Validate by calling `GET /api/libraries`.
 *Exit: entering a URL and key shows your real library names on the device.*
 
+**M1 is done.** Sign-in, key minting, config persistence and library listing all work
+against a real server. Two things changed from the plan as written:
+
+- **The app never asks for an API key.** Typing a JWT on an e-ink keyboard is unusable and
+  there is no clipboard from a computer. Instead the setup form takes an admin username,
+  password, and optionally the user the key is for; it calls `POST /login`, then
+  `POST /api/api-keys`, stores the returned key, and wipes the password. Key creation is
+  admin-only (`ApiKeyController.middleware` requires `isAdminOrUp`), and `isActive` must be
+  sent explicitly `true` or the server mints a key that authenticates nothing.
+- **`scripts/configure-device.sh`** remains as the no-typing path: it writes
+  `abs_client.cfg` straight to the mounted device.
+
+**Never block inside an inkview event handler.** This cost a debugging round in M1 and will
+cost more later, so it is a rule, not a note. inkview finishes its own show sequence after
+your handler returns; blocking inside `EVT_SHOW` means the panel never flushes what you
+drew, and the screen stays stale until some later event pumps the loop. It looks exactly
+like a 30-second hang that "clears when you press a button" — the app is idle, the display
+is simply behind. Paint, return, and do the work from a `SetWeakTimer` callback.
+
+The corollary for **M3**: a 300 MB download cannot live in a handler at all. It needs
+chunked transfer that yields to the event loop between chunks, so the UI stays painted,
+the progress bar moves, and cancel works. Budget for that rather than discovering it.
+
 **M2 — Browse.** Library list → paginated item list → item detail. Covers fetched,
 decoded via `stb_image`, scaled, cached, LRU-evicted. Search. Scale row count and font
 size from `ScreenWidth()/ScreenHeight()` — do not hardcode Verse Pro dimensions.

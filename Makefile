@@ -11,9 +11,10 @@ CC        = $(SDK_PATH)/bin/arm-obreey-linux-gnueabi-gcc
 APP_NAME  = ABSClient.app
 BUILD_DIR = build
 
-CORE_SRC = $(wildcard src/core/*.c)
-UI_SRC   = $(wildcard src/ui/*.c)
-SRC      = $(CORE_SRC) $(UI_SRC)
+CORE_SRC   = $(wildcard src/core/*.c)
+VENDOR_SRC = $(wildcard src/vendor/*.c)
+UI_SRC     = $(wildcard src/ui/*.c)
+SRC        = $(CORE_SRC) $(VENDOR_SRC) $(UI_SRC)
 OBJ      = $(patsubst src/%.c,$(BUILD_DIR)/%.o,$(SRC))
 
 # libinkview lives under /usr/local in the sysroot; everything else under /usr.
@@ -46,7 +47,7 @@ HOST_CC ?= cc
 test:
 	@mkdir -p $(BUILD_DIR)
 	$(HOST_CC) -Wall -Wextra -std=gnu99 -Isrc \
-		tests/test_core.c $(CORE_SRC) -o $(BUILD_DIR)/test_core
+		tests/test_core.c $(CORE_SRC) $(VENDOR_SRC) -o $(BUILD_DIR)/test_core
 	@$(BUILD_DIR)/test_core
 
 clean:
