@@ -12,6 +12,13 @@
 /* Only claim a book is finished within this much of the end. */
 #define FINISHED_TAIL  30.0
 
+/*
+ * How far past the server's duration a position may sit and still be read as
+ * seconds. Covers the routine disagreement between the firmware's file length
+ * and the server's summed track durations.
+ */
+#define SECONDS_SLACK  60.0
+
 int abs_parse_read_position(const char *value, char *path_out, size_t path_size,
                             double *loc_out)
 {
@@ -51,15 +58,27 @@ int abs_parse_read_position(const char *value, char *path_out, size_t path_size,
 double abs_sync_position_seconds(double raw_loc, double duration)
 {
     if (raw_loc <= 0) return 0;
+    if (duration <= 0) return raw_loc;
 
-    /* Plausible as seconds: take it. */
-    if (duration <= 0 || raw_loc <= duration) return raw_loc;
+    /*
+     * The firmware measures against the audio file; the server sums its
+     * tracks. The two differ by a second or so, so finishing a book routinely
+     * produces a position slightly PAST the server's duration. Clamp that --
+     * concluding "must be milliseconds" there would turn a finished book into
+     * 19 seconds and overwrite real progress with nothing.
+     */
+    if (raw_loc <= duration + SECONDS_SLACK) {
+        return (raw_loc > duration) ? duration : raw_loc;
+    }
 
-    /* Not plausible as seconds, but is as milliseconds. */
+    /*
+     * Only reinterpret as milliseconds when seconds is wrong by orders of
+     * magnitude, not merely by a rounding error at the end of a book.
+     */
     double as_ms = raw_loc / 1000.0;
-    if (as_ms <= duration) return as_ms;
+    if (raw_loc > duration * 10.0 && as_ms <= duration) return as_ms;
 
-    /* Neither fits -- clamp rather than send nonsense to the server. */
+    /* Neither reading fits: clamp rather than send nonsense to the server. */
     return duration;
 }
 
@@ -81,7 +100,6 @@ size_t abs_build_progress_body(double current_time, double duration,
     if (duration > 0 && current_time > duration) current_time = duration;
 
     double progress = (duration > 0) ? current_time / duration : 0.0;
-    if (progress > 1.0) progress = 1.0;
 
     int finished = (duration > 0 && current_time >= duration - FINISHED_TAIL);
 

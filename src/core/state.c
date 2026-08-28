@@ -4,12 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-static void copy_field(char *dst, size_t dst_size, const char *src, size_t len)
-{
-    if (len >= dst_size) len = dst_size - 1;
-    memcpy(dst, src, len);
-    dst[len] = '\0';
-}
+#include "core/paths.h"
 
 void abs_state_parse(const char *text, abs_state *st)
 {
@@ -34,11 +29,11 @@ void abs_state_parse(const char *text, abs_state *st)
                 } else if (klen == 4 && memcmp(p, "page", 4) == 0) {
                     st->page = atoi(val);
                 } else if (klen == 10 && memcmp(p, "library_id", 10) == 0) {
-                    copy_field(st->library_id, sizeof st->library_id, val, vlen);
+                    abs_str_copy_n(st->library_id, sizeof st->library_id, val, vlen);
                 } else if (klen == 12 && memcmp(p, "library_name", 12) == 0) {
-                    copy_field(st->library_name, sizeof st->library_name, val, vlen);
+                    abs_str_copy_n(st->library_name, sizeof st->library_name, val, vlen);
                 } else if (klen == 7 && memcmp(p, "item_id", 7) == 0) {
-                    copy_field(st->item_id, sizeof st->item_id, val, vlen);
+                    abs_str_copy_n(st->item_id, sizeof st->item_id, val, vlen);
                 }
             }
         }

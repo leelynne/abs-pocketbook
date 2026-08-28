@@ -49,7 +49,7 @@ typedef enum {
 } screen_id;
 
 typedef struct {
-    int y, h, action;
+    int x, y, w, h, action;
 } hit_row;
 
 #define MAX_ROWS 24
@@ -76,6 +76,7 @@ enum { ACT_NONE = 0, ACT_EDIT_SERVER, ACT_EDIT_ADMIN_USER, ACT_EDIT_ADMIN_PASS,
        ACT_PREV_PAGE, ACT_NEXT_PAGE, ACT_BACK_TO_ITEMS, ACT_GO_BACK,
        ACT_SCROLL_UP, ACT_SCROLL_DOWN,
        ACT_DOWNLOAD, ACT_CANCEL_DL, ACT_PLAY, ACT_DELETE,
+       ACT_SEARCH, ACT_CLEAR_SEARCH,
        ACT_PICK_LIBRARY_BASE = 1000,     /* + index into `libraries` */
        ACT_PICK_ITEM_BASE    = 2000 };   /* + index into `items` */
 
@@ -103,6 +104,26 @@ static char current_library_name[ABS_MAX_NAME];
 static abs_item_detail detail;
 static int detail_scroll;
 
+/*
+ * Snapshot of the book being downloaded.
+ *
+ * The transfer keeps running after the user leaves the download screen, so by
+ * the time it finishes `detail` may hold a different book entirely. Filing the
+ * result against that would break path-to-item resolution and, with it, sync.
+ */
+static abs_download dl_entry;
+
+/* Progress the server holds for the open book, so the reader can see where
+ * they got to on another device. -1 means "not fetched or none". */
+static double server_position = -1;
+
+/* Non-empty means the item list is showing search results, not a page. */
+static char search_query[128];
+
+/* The keyboard edits this; it is promoted to search_query only on success, so
+ * cancelling cannot leave results on screen with the pager back. */
+static char search_input[128];
+
 /* Cover geometry, derived from row height at init. */
 static int cover_w, cover_h;
 static int item_row_y[MAX_ITEMS];   /* for repainting a single row */
@@ -118,6 +139,7 @@ static void draw_current_screen(void);
 static void fetch_libraries(void);
 static void autofetch_cb(void);
 static void fetch_items(void);
+static void fetch_search(void);
 static void fetch_detail(const char *item_id);
 static void cover_tick_cb(void);
 static void start_cover_loading(void);
@@ -252,14 +274,30 @@ static void wipe_password(void)
 
 /* ---------------------------------------------------------------- drawing -- */
 
-static void add_row(int y, int h, int action)
+/*
+ * Register a tappable area.
+ *
+ * Both axes are stored. Matching on y alone made every side-by-side pair
+ * resolve to whichever was registered first -- Delete played the book, and
+ * "Next >" fired Prev on any page after the first, leaving the hardware key
+ * as the only way forward.
+ */
+static void add_row_at(int x, int y, int w, int h, int action)
 {
     if (row_count < MAX_ROWS) {
+        rows[row_count].x = x;
         rows[row_count].y = y;
+        rows[row_count].w = w;
         rows[row_count].h = h;
         rows[row_count].action = action;
         row_count++;
     }
+}
+
+/* Full-width row. */
+static void add_row(int y, int h, int action)
+{
+    add_row_at(0, y, screen_w, h, action);
 }
 
 /*
@@ -317,15 +355,18 @@ static int draw_field(int y, const char *label, const char *value, int action)
     return y + row_h;
 }
 
+static void draw_button_at(int x, int y, int w, const char *text, int action)
+{
+    DrawRectRound(x, y, w, row_h, row_h / 4, BLACK);
+    SetFont(font_body, BLACK);
+    DrawTextRect(x, y + row_h / 4, w, row_h / 2, text, ALIGN_CENTER);
+
+    add_row_at(x, y, w, row_h, action);
+}
+
 static int draw_button(int y, const char *text, int action)
 {
-    int bw = screen_w - margin * 2;
-
-    DrawRectRound(margin, y, bw, row_h, row_h / 4, BLACK);
-    SetFont(font_body, BLACK);
-    DrawTextRect(margin, y + row_h / 4, bw, row_h / 2, text, ALIGN_CENTER);
-
-    add_row(y, row_h, action);
+    draw_button_at(margin, y, screen_w - margin * 2, text, action);
     return y + row_h;
 }
 
@@ -480,7 +521,9 @@ static void draw_items_screen(void)
     ClearScreen();
     row_count = 0;
 
-    draw_header_ex(current_library_name[0] ? current_library_name : "Books", 1);
+    draw_header_ex(search_query[0] ? search_query
+                                   : (current_library_name[0] ? current_library_name
+                                                              : "Books"), 1);
 
     int y = header_h + row_h / 4;
 
@@ -503,26 +546,31 @@ static void draw_items_screen(void)
     if (pages < 1) pages = 1;
 
     int py = screen_h - row_h * 2;
-    int half = (screen_w - margin * 2) / 2;
 
-    if (item_page > 0) {
-        DrawRectRound(margin, py, half - margin / 2, row_h, row_h / 4, BLACK);
-        SetFont(font_body, BLACK);
-        DrawTextRect(margin, py + row_h / 4, half - margin / 2, row_h / 2,
-                     "< Prev", ALIGN_CENTER);
-        add_row(py, row_h, ACT_PREV_PAGE);
-    }
-    if (item_page + 1 < pages) {
-        DrawRectRound(margin + half + margin / 2, py, half - margin / 2, row_h,
-                      row_h / 4, BLACK);
-        SetFont(font_body, BLACK);
-        DrawTextRect(margin + half + margin / 2, py + row_h / 4, half - margin / 2,
-                     row_h / 2, "Next >", ALIGN_CENTER);
-        add_row(py, row_h, ACT_NEXT_PAGE);
+    if (search_query[0]) {
+        /* Results are a single list, so the pager is replaced by a way out. */
+        draw_button_at(margin, py, screen_w - margin * 2, "Clear search",
+                       ACT_CLEAR_SEARCH);
+    } else {
+        int third = (screen_w - margin * 2 - margin) / 3;
+
+        if (item_page > 0) {
+            draw_button_at(margin, py, third, "< Prev", ACT_PREV_PAGE);
+        }
+        draw_button_at(margin + third + margin / 2, py, third, "Search", ACT_SEARCH);
+        if (item_page + 1 < pages) {
+            draw_button_at(margin + (third + margin / 2) * 2, py, third,
+                           "Next >", ACT_NEXT_PAGE);
+        }
     }
 
-    snprintf(counter, sizeof counter, "Page %d of %d  -  %d books  -  %s",
-             item_page + 1, pages, item_total, abs_version_string());
+    if (search_query[0]) {
+        snprintf(counter, sizeof counter, "%d result%s for \"%s\"",
+                 item_count, item_count == 1 ? "" : "s", search_query);
+    } else {
+        snprintf(counter, sizeof counter, "Page %d of %d  -  %d books  -  %s",
+                 item_page + 1, pages, item_total, abs_version_string());
+    }
     draw_footer(counter);
 
     FullUpdate();
@@ -598,6 +646,20 @@ static void draw_detail_screen(void)
                  ALIGN_LEFT | DOTS);
     y += row_h / 2;
 
+    if (server_position >= 0 || server_position == -2) {
+        char pos_s[64];
+        SetFont(font_hint, BLACK);
+        if (server_position == -2) {
+            snprintf(line, sizeof line, "Audiobookshelf: finished");
+        } else {
+            abs_format_duration(server_position, pos_s, sizeof pos_s);
+            snprintf(line, sizeof line, "Audiobookshelf: %s of %s", pos_s, dur);
+        }
+        DrawTextRect(text_x, y, screen_w - text_x - margin, row_h / 3, line,
+                     ALIGN_LEFT | DOTS);
+        y += row_h / 3;
+    }
+
     DrawLine(margin, y, screen_w - margin, y, LGRAY);
     y += row_h / 4;
 
@@ -632,25 +694,13 @@ static void draw_detail_screen(void)
     int half = (screen_w - margin * 2 - margin / 2) / 2;
 
     if (have != NULL) {
-        DrawRectRound(margin, act_y, half, row_h, row_h / 4, BLACK);
-        SetFont(font_body, BLACK);
-        DrawTextRect(margin, act_y + row_h / 4, half, row_h / 2, "Play", ALIGN_CENTER);
-        add_row(act_y, row_h, ACT_PLAY);
-
-        DrawRectRound(margin + half + margin / 2, act_y, half, row_h, row_h / 4, DGRAY);
-        DrawTextRect(margin + half + margin / 2, act_y + row_h / 4, half, row_h / 2,
-                     "Delete", ALIGN_CENTER);
-        add_row(act_y, row_h, ACT_DELETE);
+        draw_button_at(margin, act_y, half, "Play", ACT_PLAY);
+        draw_button_at(margin + half + margin / 2, act_y, half, "Delete", ACT_DELETE);
     } else if (detail.track_count > 0) {
         char label[64], sz[32];
         abs_format_size(detail.tracks_total_size, sz, sizeof sz);
         snprintf(label, sizeof label, "Download  (%s)", sz);
-
-        DrawRectRound(margin, act_y, screen_w - margin * 2, row_h, row_h / 4, BLACK);
-        SetFont(font_body, BLACK);
-        DrawTextRect(margin, act_y + row_h / 4, screen_w - margin * 2, row_h / 2,
-                     label, ALIGN_CENTER);
-        add_row(act_y, row_h, ACT_DOWNLOAD);
+        draw_button_at(margin, act_y, screen_w - margin * 2, label, ACT_DOWNLOAD);
     }
 
     draw_footer("Tap lower half to scroll  |  < to go back");
@@ -740,11 +790,8 @@ static void draw_download_screen(void)
                      st->message, ALIGN_CENTER);
         y += row_h * 2;
 
-        DrawRectRound(margin, y, screen_w - margin * 2, row_h, row_h / 4, BLACK);
-        SetFont(font_body, BLACK);
-        DrawTextRect(margin, y + row_h / 4, screen_w - margin * 2, row_h / 2,
-                     "Back to book", ALIGN_CENTER);
-        add_row(y, row_h, ACT_BACK_TO_ITEMS);
+        draw_button_at(margin, y, screen_w - margin * 2, "Back to book",
+                       ACT_BACK_TO_ITEMS);
     }
 
     SetFont(font_hint, DGRAY);
@@ -959,6 +1006,47 @@ static void fetch_items(void)
     }
 }
 
+static void fetch_search(void)
+{
+    char url[ABS_MAX_URL + 640];
+    abs_http_response res;
+
+    if (!ready_to_request()) return;
+
+    if (abs_url_search(&config, current_library_id, search_query, MAX_ITEMS,
+                       url, sizeof url) == 0) {
+        fail("That search is too long.");
+        return;
+    }
+
+    unsigned long t0 = abs_now_ms();
+    int ok = abs_http_get(&config, url, &res, RESPONSE_CAP);
+    abs_log("search request took %lums", abs_now_ms() - t0);
+
+    if (!ok) { fail(res.error); return; }
+
+    const char *status_msg = abs_http_status_message(res.status);
+    if (status_msg != NULL) {
+        abs_http_free(&res);
+        fail(status_msg);
+        return;
+    }
+
+    int n = abs_parse_search_items(res.data, items, MAX_ITEMS);
+    abs_http_free(&res);
+
+    if (n < 0) { fail("Could not read the search results."); return; }
+
+    item_count = n;
+    item_total = n;
+    item_page = 0;
+    abs_log("search \"%s\": %d result(s)", search_query, n);
+
+    current_screen = SCREEN_ITEMS;
+    draw_current_screen();
+    start_cover_loading();
+}
+
 static void fetch_detail(const char *item_id)
 {
     char url[ABS_MAX_URL + 128];
@@ -990,15 +1078,38 @@ static void fetch_detail(const char *item_id)
     if (!parsed) { fail("Could not read that book's details."); return; }
 
     detail_scroll = 0;
+    server_position = -1;
+
+    /*
+     * What does the server think? Cheap, and it is how a reader sees progress
+     * made on another device -- we deliberately do not write position back to
+     * the firmware, so showing it is the honest half of that.
+     */
+    char purl[ABS_MAX_URL + 96];
+    if (abs_url_progress(&config, detail.id, purl, sizeof purl) > 0) {
+        abs_http_response pres;
+        if (abs_http_get(&config, purl, &pres, 64 * 1024)) {
+            double ct = 0, dur = 0;
+            int finished = 0;
+            /* 404 simply means no progress recorded yet. */
+            if (pres.status == 200 &&
+                abs_parse_progress(pres.data, &ct, &dur, &finished)) {
+                server_position = finished ? -2 : ct;
+            }
+            abs_http_free(&pres);
+        }
+    }
+
+    /*
+     * Warm the cover before the first paint. Fetching between two paints cost
+     * a second full-screen refresh for no benefit, since the fetch blocks
+     * either way.
+     */
+    int big_w = screen_w / 3;
+    abs_cover_get(&config, detail.id, big_w, big_w * 3 / 2, 1);
+
     current_screen = SCREEN_DETAIL;
     draw_current_screen();
-
-    /* Pull the large cover, then repaint once it is in the cache. */
-    int big_w = screen_w / 3;
-    if (abs_cover_get(&config, detail.id, big_w, big_w * 3 / 2, 1) != NULL &&
-        current_screen == SCREEN_DETAIL) {
-        draw_current_screen();
-    }
 }
 
 /* ---------------------------------------------------------------- sign-in -- */
@@ -1039,8 +1150,7 @@ static void do_sign_in(void)
     if (form_admin_user[0] == '\0') { fail("Enter the admin username."); return; }
     if (form_admin_pass[0] == '\0') { fail("Enter the admin password."); return; }
 
-    draw_busy("Connecting to Wi-Fi...");
-
+    /* The caller already painted "Connecting to Wi-Fi...". */
     char neterr[192];
     unsigned long t0 = abs_now_ms();
     if (!abs_net_connect(neterr, sizeof neterr)) {
@@ -1252,20 +1362,11 @@ static void dl_pump_cb(void)
 
     repaint_counter = 0;
 
-    if (st->state == DL_DONE) {
-        abs_download entry;
-        memset(&entry, 0, sizeof entry);
-        snprintf(entry.item_id, sizeof entry.item_id, "%s", detail.id);
-        abs_manifest_dir_for(detail.author, detail.title, entry.dir, sizeof entry.dir);
-        snprintf(entry.title, sizeof entry.title, "%s", detail.title);
-        snprintf(entry.author, sizeof entry.author, "%s", detail.author);
-        entry.duration = detail.duration;
-        entry.size = st->done_bytes;
-        entry.track_count = detail.track_count;
-
-        abs_manifest_put(&manifest, &entry);
+    if (st->state == DL_DONE && dl_entry.item_id[0] != '\0') {
+        dl_entry.size = st->done_bytes;
+        abs_manifest_put(&manifest, &dl_entry);
         manifest_save();
-        abs_log("recorded download: %s -> %s", entry.item_id, entry.dir);
+        abs_log("recorded download: %s -> %s", dl_entry.item_id, dl_entry.dir);
     }
 
     if (current_screen == SCREEN_DOWNLOAD) draw_current_screen();
@@ -1348,8 +1449,19 @@ static void sync_progress(void)
 static void sync_cb(void)
 {
     sync_progress();
-    if (current_screen == SCREEN_LIBRARIES || current_screen == SCREEN_ITEMS) {
-        draw_current_screen();
+
+    /*
+     * Repaint only the status line. A full redraw here meant two full e-ink
+     * refreshes back to back on every launch -- the list, then this -- to
+     * change one line of text.
+     */
+    if (current_screen == SCREEN_LIBRARIES && status_message[0]) {
+        int y = header_h + row_h / 3;
+        FillArea(0, y, screen_w, row_h / 2, WHITE);
+        SetFont(font_hint, DGRAY);
+        DrawTextRect(margin, y, screen_w - margin * 2, row_h / 2,
+                     status_message, ALIGN_LEFT | DOTS);
+        PartialUpdate(0, y, screen_w, row_h / 2);
     }
 }
 
@@ -1395,6 +1507,25 @@ static void defer_detail(const char *item_id)
  * callbacks must not copy it onto itself or clear it. (Clearing it here is
  * what previously sent every login with an empty password.)
  */
+static void do_sign_in_cb(void)
+{
+    do_sign_in();
+}
+
+static void search_cb(void)
+{
+    fetch_search();
+}
+
+static void search_entered(char *text)
+{
+    if (text == NULL || text[0] == '\0') return;   /* cancelled or empty */
+
+    snprintf(search_query, sizeof search_query, "%s", search_input);
+    draw_busy("Searching...");
+    SetWeakTimer("abs_search", search_cb, 200);
+}
+
 static void server_entered(char *text)
 {
     if (text == NULL) return;               /* cancelled */
@@ -1482,7 +1613,9 @@ static void handle_action(int action)
         break;
 
     case ACT_SIGN_IN:
-        do_sign_in();
+        /* Same rule as every other request: never from inside a handler. */
+        draw_busy("Connecting to Wi-Fi...");
+        SetWeakTimer("abs_signin", do_sign_in_cb, 200);
         break;
 
     case ACT_SHOW_LIBRARIES:
@@ -1496,6 +1629,14 @@ static void handle_action(int action)
         break;
 
     case ACT_DOWNLOAD: {
+        /* Already downloading? Show it rather than starting a second one on
+         * top of the first. */
+        if (abs_dl_status_get()->state == DL_RUNNING) {
+            current_screen = SCREEN_DOWNLOAD;
+            draw_current_screen();
+            break;
+        }
+
         char dir[ABS_MAX_DIR];
         if (abs_manifest_dir_for(detail.author, detail.title, dir, sizeof dir) == 0) {
             Message(ICON_WARNING, "Cannot download",
@@ -1503,12 +1644,20 @@ static void handle_action(int action)
             break;
         }
 
-        current_screen = SCREEN_DOWNLOAD;
-        draw_current_screen();
+        /* Capture the book now: `detail` may be a different one by the time
+         * the transfer finishes. */
+        memset(&dl_entry, 0, sizeof dl_entry);
+        snprintf(dl_entry.item_id, sizeof dl_entry.item_id, "%s", detail.id);
+        snprintf(dl_entry.dir, sizeof dl_entry.dir, "%s", dir);
+        snprintf(dl_entry.title, sizeof dl_entry.title, "%s", detail.title);
+        snprintf(dl_entry.author, sizeof dl_entry.author, "%s", detail.author);
+        dl_entry.duration = detail.duration;
+        dl_entry.track_count = detail.track_count;
 
         if (abs_dl_start(&config, &detail, dir)) {
             SetWeakTimer("abs_dl", dl_pump_cb, 100);
         }
+        current_screen = SCREEN_DOWNLOAD;
         draw_current_screen();
         break;
     }
@@ -1528,10 +1677,15 @@ static void handle_action(int action)
         const abs_download *have = abs_manifest_find(&manifest, detail.id);
         if (have == NULL) break;
 
+        if (detail.track_count == 0) {
+            Message(ICON_WARNING, "Nothing to play",
+                    "This book has no audio files.", 3000);
+            break;
+        }
+
         char safe_name[ABS_MAX_NAME];
         char path[ABS_MAX_DIR + ABS_MAX_NAME + 8];
-        abs_sanitize_component(detail.track_count > 0 ? detail.tracks[0].filename : "",
-                               safe_name, sizeof safe_name);
+        abs_sanitize_component(detail.tracks[0].filename, safe_name, sizeof safe_name);
         snprintf(path, sizeof path, "%s/%s", have->dir, safe_name);
 
         /*
@@ -1571,6 +1725,18 @@ static void handle_action(int action)
         draw_current_screen();
         break;
     }
+
+    case ACT_SEARCH:
+        search_input[0] = '\0';
+        OpenKeyboard("Search this library", search_input,
+                     sizeof search_input - 1, KBD_NORMAL, search_entered);
+        break;
+
+    case ACT_CLEAR_SEARCH:
+        search_query[0] = '\0';
+        item_page = 0;
+        defer_items("Loading books...");
+        break;
 
     case ACT_PREV_PAGE:
         if (item_page > 0) {
@@ -1622,6 +1788,7 @@ static void handle_action(int action)
                 snprintf(current_library_name, sizeof current_library_name, "%s",
                          libraries[i].name);
                 item_page = 0;
+                search_query[0] = '\0';
                 defer_items("Loading books...");
             }
         }
@@ -1629,10 +1796,11 @@ static void handle_action(int action)
     }
 }
 
-static void handle_tap(int y)
+static void handle_tap(int x, int y)
 {
     for (int i = 0; i < row_count; i++) {
-        if (y >= rows[i].y && y < rows[i].y + rows[i].h) {
+        if (x >= rows[i].x && x < rows[i].x + rows[i].w &&
+            y >= rows[i].y && y < rows[i].y + rows[i].h) {
             handle_action(rows[i].action);
             return;
         }
@@ -1690,6 +1858,12 @@ static int main_handler(int type, int par1, int par2)
         if (items_per_page < 4) items_per_page = 4;
         if (items_per_page > MAX_ITEMS) items_per_page = MAX_ITEMS;
 
+        /* Cover thumbnails sit inside a list row, at book proportions.
+         * These were previously left at zero, which disabled list covers and
+         * the whole progressive-loading path along with them. */
+        cover_h = row_h - row_h / 8;
+        cover_w = cover_h * 2 / 3;
+
         {
             unsigned long t = abs_now_ms();
             open_fonts();
@@ -1740,7 +1914,7 @@ static int main_handler(int type, int par1, int par2)
     }
 
     case EVT_POINTERUP:
-        handle_tap(par2);
+        handle_tap(par1, par2);
         return 1;
 
     /*

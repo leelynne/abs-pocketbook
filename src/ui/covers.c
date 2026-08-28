@@ -22,7 +22,12 @@
 #define COVER_DIR       ABS_APP_DIR "/covers"
 #define COVER_CACHE_CAP (20 * 1024 * 1024)   /* bytes on disk */
 #define COVER_MAX_BYTES (4 * 1024 * 1024)    /* refuse absurd images */
-#define MEM_CACHE_SIZE  12                   /* decoded thumbnails held */
+/*
+ * Must exceed one screenful of rows, or a single page evicts its own covers
+ * while drawing them. items_per_page is derived from screen height and capped
+ * at 64.
+ */
+#define MEM_CACHE_SIZE  20                   /* decoded thumbnails held */
 
 typedef struct {
     char      id[ABS_MAX_ID];
@@ -201,8 +206,11 @@ static ibitmap *decode_to_bitmap(const unsigned char *bytes, size_t len,
     bm->scanline = (unsigned short)scanline;
 
     for (int y = 0; y < dh; y++) {
-        memcpy(bm->data + (size_t)y * scanline,
-               scaled + (size_t)y * dw * 3, (size_t)dw * 3);
+        unsigned char *row = bm->data + (size_t)y * scanline;
+        memcpy(row, scaled + (size_t)y * dw * 3, (size_t)dw * 3);
+        /* Zero the row padding rather than hand uninitialised heap to the
+         * framework. */
+        memset(row + dw * 3, 0, (size_t)scanline - (size_t)dw * 3);
     }
 
     free(scaled);

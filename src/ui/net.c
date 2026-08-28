@@ -79,13 +79,26 @@ static int http_request(const abs_config *cfg, const char *url, const char *body
 
     char auth[ABS_MAX_TOKEN + 64];
     struct curl_slist *headers = NULL;
+    struct curl_slist *appended = NULL;
+
+    /* curl_slist_append returns NULL on failure and strands the existing list,
+     * so keep the old head and bail rather than sending an unauthenticated
+     * request. */
     if (bearer != NULL && bearer[0] != '\0' &&
         abs_auth_header_token(bearer, auth, sizeof auth) > 0) {
-        headers = curl_slist_append(headers, auth);
+        appended = curl_slist_append(headers, auth);
+        if (appended == NULL) goto header_failure;
+        headers = appended;
     }
-    headers = curl_slist_append(headers, "Accept: application/json");
+
+    appended = curl_slist_append(headers, "Accept: application/json");
+    if (appended == NULL) goto header_failure;
+    headers = appended;
+
     if (body != NULL) {
-        headers = curl_slist_append(headers, "Content-Type: application/json");
+        appended = curl_slist_append(headers, "Content-Type: application/json");
+        if (appended == NULL) goto header_failure;
+        headers = appended;
     }
 
     write_ctx ctx = { res, max_bytes, 0 };
@@ -141,6 +154,12 @@ static int http_request(const abs_config *cfg, const char *url, const char *body
 
     abs_log("HTTP %ld, %lu bytes", res->status, (unsigned long)res->len);
     return 1;
+
+header_failure:
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+    snprintf(res->error, sizeof res->error, "Out of memory building the request.");
+    return 0;
 }
 
 int abs_http_get(const abs_config *cfg, const char *url,

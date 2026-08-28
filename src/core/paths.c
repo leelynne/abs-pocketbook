@@ -10,6 +10,17 @@ static int is_forbidden(unsigned char c)
     return strchr("<>:\"/\\|?*", c) != NULL;
 }
 
+void abs_str_copy_n(char *dst, size_t dst_size, const char *src, size_t len)
+{
+    if (dst == NULL || dst_size == 0) return;
+
+    if (src == NULL) { dst[0] = '\0'; return; }
+    if (len >= dst_size) len = dst_size - 1;
+
+    memcpy(dst, src, len);
+    dst[len] = '\0';
+}
+
 size_t abs_sanitize_component(const char *in, char *out, size_t out_size)
 {
     size_t w = 0;

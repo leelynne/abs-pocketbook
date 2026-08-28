@@ -189,9 +189,6 @@ static void test_urls(void)
     abs_url_item_cover(&cfg, "li_abc", buf, sizeof buf);
     check_str("cover", buf, "https://abs.example.com/api/items/li_abc/cover?token=tok123");
 
-    abs_auth_header(&cfg, buf, sizeof buf);
-    check_str("auth header", buf, "Authorization: Bearer tok123");
-
     /* Overflow must return 0 and not emit a half-formed URL. */
     char tiny[10];
     check_int("url into tiny buffer", (long)abs_url_libraries(&cfg, tiny, sizeof tiny), 0);
@@ -362,6 +359,8 @@ static void test_format(void)
     abs_format_size(1503238553LL, buf, sizeof buf); check_str("GB", buf, "1.4 GB");
     abs_format_size(327155712LL, buf, sizeof buf);  check_str("MB", buf, "312 MB");
     abs_format_size(0, buf, sizeof buf);            check_str("no size", buf, "--");
+    /* Just under 1 GB must not round up into "1024 MB". */
+    abs_format_size(1073741823LL, buf, sizeof buf);  check_str("just under 1 GB", buf, "1.0 GB");
 }
 
 static void test_strip_html(void)
@@ -416,7 +415,6 @@ static void test_parse_items(void)
     check_int("total drives paging", total, 57);
     check_str("title", items[0].title, "Dune");
     check_str("author", items[0].author, "Frank Herbert");
-    check_int("tracks", items[1].num_tracks, 12);
 
     /* An item with no media should still list rather than vanish. */
     check_int("bare item", abs_parse_items("{\"results\":[{\"id\":\"li_3\"}],\"total\":1}",
@@ -558,6 +556,29 @@ static void test_parse_tracks(void)
     check_int("skipped", d.track_count, 0);
 
     /* An ebook-only item simply has no tracks. */
+    /*
+     * More tracks than we store. The count is capped, but tracks_total_size
+     * feeds both the "download 312 MB?" prompt and the free-space check, so an
+     * undercount could let a book fill the device.
+     */
+    {
+        char big[16384];
+        int off = snprintf(big, sizeof big,
+            "{\"id\":\"x\",\"media\":{\"metadata\":{\"title\":\"T\"},\"audioFiles\":[");
+        for (int i = 0; i < ABS_MAX_TRACKS + 6; i++) {
+            off += snprintf(big + off, sizeof big - off,
+                "%s{\"ino\":\"%d\",\"metadata\":{\"filename\":\"f%d.mp3\",\"size\":1000}}",
+                i ? "," : "", i, i);
+        }
+        snprintf(big + off, sizeof big - off, "]}}");
+
+        abs_item_detail many;
+        check_int("parses oversized book", abs_parse_item_detail(big, &many), 1);
+        check_int("track count capped", many.track_count, ABS_MAX_TRACKS);
+        check_int("size counts only stored tracks",
+                  (long)many.tracks_total_size, ABS_MAX_TRACKS * 1000);
+    }
+
     check_int("no audioFiles key",
               abs_parse_item_detail("{\"id\":\"x\",\"media\":{\"metadata\":{\"title\":\"T\"}}}", &d), 1);
     check_int("zero tracks", d.track_count, 0);
@@ -646,6 +667,41 @@ static void test_manifest(void)
     check_int("survives junk", out.count, 1);
     check_str("recovered id", out.items[0].item_id, "li_9");
 
+    /* Tab-separation exists precisely so '=' and ':' in free text survive. */
+    abs_manifest tricky;
+    memset(&tricky, 0, sizeof tricky);
+    abs_download odd;
+    memset(&odd, 0, sizeof odd);
+    snprintf(odd.item_id, sizeof odd.item_id, "%s", "li_2");
+    snprintf(odd.dir, sizeof odd.dir, "%s", "/mnt/ext1/Audio Books/X");
+    snprintf(odd.title, sizeof odd.title, "%s", "Title: A=B, Part 2");
+    snprintf(odd.author, sizeof odd.author, "%s", "Name: Surname");
+    abs_manifest_put(&tricky, &odd);
+
+    char tbuf[2048];
+    abs_manifest_serialize(&tricky, tbuf, sizeof tbuf);
+    abs_manifest parsed_odd;
+    abs_manifest_parse(tbuf, &parsed_odd);
+    check_str("colon and equals in title", parsed_odd.items[0].title, "Title: A=B, Part 2");
+    check_str("colon in author", parsed_odd.items[0].author, "Name: Surname");
+
+    /* The documented full-manifest failure path. */
+    abs_manifest full;
+    memset(&full, 0, sizeof full);
+    for (int i = 0; i < ABS_MAX_DOWNLOADS; i++) {
+        abs_download f;
+        memset(&f, 0, sizeof f);
+        snprintf(f.item_id, sizeof f.item_id, "li_%d", i);
+        snprintf(f.dir, sizeof f.dir, "/d/%d", i);
+        abs_manifest_put(&full, &f);
+    }
+    check_int("manifest fills", full.count, ABS_MAX_DOWNLOADS);
+    abs_download overflow;
+    memset(&overflow, 0, sizeof overflow);
+    snprintf(overflow.item_id, sizeof overflow.item_id, "%s", "one_too_many");
+    snprintf(overflow.dir, sizeof overflow.dir, "%s", "/d/x");
+    check_int("refuses when full", abs_manifest_put(&full, &overflow), 0);
+
     char tiny[16];
     check_int("tiny buffer refuses", (long)abs_manifest_serialize(&m, tiny, sizeof tiny), 0);
 }
@@ -718,6 +774,17 @@ static void test_position_units(void)
     check_int("87s of a 24057s book", (long)abs_sync_position_seconds(87, 24057), 87);
     check_int("39s of a 19222s book", (long)abs_sync_position_seconds(39, 19222), 39);
 
+    /*
+     * The end of a book. The firmware measures the audio file; the server sums
+     * its tracks; they differ by a second or so. A finished book therefore
+     * lands slightly PAST the server's duration, and that must clamp -- an
+     * earlier version concluded "milliseconds" here and pushed 19 seconds over
+     * a completed book, wiping real progress.
+     */
+    check_int("exactly at duration", (long)abs_sync_position_seconds(19222, 19222), 19222);
+    check_int("one second past", (long)abs_sync_position_seconds(19223, 19222), 19222);
+    check_int("a minute past", (long)abs_sync_position_seconds(19280, 19222), 19222);
+
     /* If it cannot be seconds but works as ms, it is ms. This is the guard
      * against silently scaling every position by 1000. */
     check_int("ms fallback", (long)abs_sync_position_seconds(90000, 3600), 90);
@@ -770,6 +837,94 @@ static void test_should_push(void)
     check_int("rewound", abs_sync_should_push(60, 600), 1);
 }
 
+static void test_url_encode(void)
+{
+    char buf[256];
+
+    printf("url encoding:\n");
+
+    abs_url_encode("dune", buf, sizeof buf);
+    check_str("plain", buf, "dune");
+
+    abs_url_encode("the martian", buf, sizeof buf);
+    check_str("space", buf, "the%20martian");
+
+    /* An unencoded ampersand would truncate the query at the server. */
+    abs_url_encode("Herbert & Sons", buf, sizeof buf);
+    check_str("ampersand", buf, "Herbert%20%26%20Sons");
+
+    abs_url_encode("a+b=c?d#e", buf, sizeof buf);
+    check_str("reserved chars", buf, "a%2Bb%3Dc%3Fd%23e");
+
+    abs_url_encode("-_.~", buf, sizeof buf);
+    check_str("unreserved kept", buf, "-_.~");
+
+    char small[6];
+    check_int("refuses overflow", (long)abs_url_encode("abcdefgh", small, sizeof small), 0);
+    check_int("null", (long)abs_url_encode(NULL, buf, sizeof buf), 0);
+}
+
+static void test_search(void)
+{
+    abs_config cfg;
+    abs_item items[8];
+    char buf[512];
+
+    printf("search:\n");
+
+    memset(&cfg, 0, sizeof cfg);
+    snprintf(cfg.server, sizeof cfg.server, "%s", "https://abs.example.com");
+
+    abs_url_search(&cfg, "lib_1", "the martian", 25, buf, sizeof buf);
+    check_str("url", buf,
+              "https://abs.example.com/api/libraries/lib_1/search?q=the%20martian&limit=25");
+
+    /* Hits are wrapped in libraryItem, unlike the plain item list. */
+    const char *body =
+        "{\"book\":["
+        "{\"libraryItem\":{\"id\":\"li_7\",\"media\":{\"duration\":600,\"numTracks\":2,"
+        "\"metadata\":{\"title\":\"The Martian\",\"authorName\":\"Andy Weir\"}}}}"
+        "],\"tags\":[],\"series\":[],\"authors\":[]}";
+
+    check_int("count", abs_parse_search_items(body, items, 8), 1);
+    check_str("title", items[0].title, "The Martian");
+    check_str("author", items[0].author, "Andy Weir");
+    check_str("id", items[0].id, "li_7");
+
+    check_int("no book key", abs_parse_search_items("{\"authors\":[]}", items, 8), -1);
+    check_int("empty results", abs_parse_search_items("{\"book\":[]}", items, 8), 0);
+    check_int("not json", abs_parse_search_items("<html>", items, 8), -1);
+    /* A hit missing its libraryItem must be skipped, not crash. */
+    check_int("malformed hit",
+              abs_parse_search_items("{\"book\":[{\"matchKey\":\"title\"}]}", items, 8), 0);
+}
+
+static void test_parse_progress(void)
+{
+    double ct = -1, dur = -1;
+    int fin = -1;
+
+    printf("progress parsing:\n");
+
+    check_int("parses",
+              abs_parse_progress("{\"libraryItemId\":\"li_1\",\"currentTime\":1234.5,"
+                                 "\"duration\":24057,\"progress\":0.05,"
+                                 "\"isFinished\":false}", &ct, &dur, &fin), 1);
+    check_int("currentTime", (long)ct, 1234);
+    check_int("duration", (long)dur, 24057);
+    check_int("not finished", fin, 0);
+
+    check_int("finished flag",
+              abs_parse_progress("{\"currentTime\":10,\"isFinished\":true}", &ct, &dur, &fin), 1);
+    check_int("finished", fin, 1);
+
+    /* 404 bodies and anything without currentTime are "no progress". */
+    check_int("no currentTime",
+              abs_parse_progress("{\"error\":\"none\"}", &ct, &dur, &fin), 0);
+    check_int("not json", abs_parse_progress("Not Found", &ct, &dur, &fin), 0);
+    check_int("null", abs_parse_progress(NULL, &ct, &dur, &fin), 0);
+}
+
 int main(void)
 {
     test_sanitize();
@@ -798,6 +953,9 @@ int main(void)
     test_position_units();
     test_progress_body();
     test_should_push();
+    test_url_encode();
+    test_search();
+    test_parse_progress();
 
     if (failures) {
         printf("\n%d failure(s)\n", failures);

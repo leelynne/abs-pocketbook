@@ -15,13 +15,6 @@
  */
 #define FIELD_SEP '\t'
 
-static void copy_field(char *dst, size_t dst_size, const char *src, size_t len)
-{
-    if (len >= dst_size) len = dst_size - 1;
-    memcpy(dst, src, len);
-    dst[len] = '\0';
-}
-
 /* Advance past one field, copying it out. Returns the next field start. */
 static const char *take_field(const char *p, const char *end,
                               char *dst, size_t dst_size)
@@ -29,7 +22,7 @@ static const char *take_field(const char *p, const char *end,
     const char *sep = memchr(p, FIELD_SEP, (size_t)(end - p));
     const char *stop = (sep != NULL) ? sep : end;
 
-    if (dst != NULL) copy_field(dst, dst_size, p, (size_t)(stop - p));
+    if (dst != NULL) abs_str_copy_n(dst, dst_size, p, (size_t)(stop - p));
     return (sep != NULL) ? sep + 1 : end;
 }
 

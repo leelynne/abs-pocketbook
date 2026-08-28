@@ -34,4 +34,13 @@
  */
 size_t abs_sanitize_component(const char *in, char *out, size_t out_size);
 
+/*
+ * Copy at most `len` bytes of `src` into `dst`, always NUL-terminating.
+ *
+ * One copy of what config.c, state.c and manifest.c each had privately.
+ * Tolerates dst_size == 0, where the old versions computed `len = dst_size - 1`
+ * and underflowed to SIZE_MAX.
+ */
+void abs_str_copy_n(char *dst, size_t dst_size, const char *src, size_t len);
+
 #endif /* ABS_PATHS_H */

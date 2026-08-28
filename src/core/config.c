@@ -3,12 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 
-static void copy_field(char *dst, size_t dst_size, const char *src, size_t len)
-{
-    if (len >= dst_size) len = dst_size - 1;
-    memcpy(dst, src, len);
-    dst[len] = '\0';
-}
+#include "core/paths.h"
 
 static const char *skip_spaces(const char *p, const char *end)
 {
@@ -46,9 +41,9 @@ void abs_config_parse(const char *text, abs_config *cfg)
                 size_t val_len = (size_t)(val_end - val);
 
                 if (key_len == 6 && memcmp(key, "server", 6) == 0) {
-                    copy_field(cfg->server, sizeof cfg->server, val, val_len);
+                    abs_str_copy_n(cfg->server, sizeof cfg->server, val, val_len);
                 } else if (key_len == 5 && memcmp(key, "token", 5) == 0) {
-                    copy_field(cfg->token, sizeof cfg->token, val, val_len);
+                    abs_str_copy_n(cfg->token, sizeof cfg->token, val, val_len);
                 } else if (key_len == 8 && memcmp(key, "insecure", 8) == 0) {
                     cfg->insecure = (val_len > 0 && val[0] == '1') ? 1 : 0;
                 }

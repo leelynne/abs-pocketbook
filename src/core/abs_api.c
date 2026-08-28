@@ -1,4 +1,5 @@
 #include "core/abs_api.h"
+#include "core/paths.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -35,11 +36,6 @@ size_t abs_url_item_cover(const abs_config *cfg, const char *item_id,
                      cfg->server, item_id, cfg->token);
 }
 
-size_t abs_auth_header(const abs_config *cfg, char *out, size_t out_size)
-{
-    return write_url(out, out_size, "Authorization: Bearer %s", cfg->token);
-}
-
 size_t abs_auth_header_token(const char *token, char *out, size_t out_size)
 {
     return write_url(out, out_size, "Authorization: Bearer %s", token);
@@ -64,12 +60,13 @@ static void copy_string_field(const cJSON *obj, const char *key,
                               char *dst, size_t dst_size)
 {
     const cJSON *item = cJSON_GetObjectItemCaseSensitive(obj, key);
+
+    if (dst == NULL || dst_size == 0) return;
     dst[0] = '\0';
+
     if (cJSON_IsString(item) && item->valuestring != NULL) {
-        size_t len = strlen(item->valuestring);
-        if (len >= dst_size) len = dst_size - 1;
-        memcpy(dst, item->valuestring, len);
-        dst[len] = '\0';
+        abs_str_copy_n(dst, dst_size, item->valuestring,
+                       strlen(item->valuestring));
     }
 }
 
@@ -298,6 +295,125 @@ static void copy_year_field(const cJSON *obj, const char *key,
     }
 }
 
+/* Pull one abs_item out of a library-item object. 0 if unusable. */
+static int item_from_json(const cJSON *entry, abs_item *item)
+{
+    memset(item, 0, sizeof *item);
+
+    copy_string_field(entry, "id", item->id, sizeof item->id);
+    if (item->id[0] == '\0') return 0;
+
+    const cJSON *media = cJSON_GetObjectItemCaseSensitive(entry, "media");
+    if (cJSON_IsObject(media)) {
+        item->duration = number_field(media, "duration");
+
+        const cJSON *meta = cJSON_GetObjectItemCaseSensitive(media, "metadata");
+        if (cJSON_IsObject(meta)) {
+            copy_string_field(meta, "title", item->title, sizeof item->title);
+            copy_string_field(meta, "authorName", item->author, sizeof item->author);
+        }
+    }
+
+    if (item->title[0] == '\0') {
+        snprintf(item->title, sizeof item->title, "%s", "(untitled)");
+    }
+    return 1;
+}
+
+size_t abs_url_encode(const char *in, char *out, size_t out_size)
+{
+    static const char *hex = "0123456789ABCDEF";
+    size_t w = 0;
+
+    if (out == NULL || out_size == 0) return 0;
+    if (in == NULL) { out[0] = '\0'; return 0; }
+
+    for (const unsigned char *p = (const unsigned char *)in; *p; p++) {
+        unsigned char c = *p;
+        int unreserved = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                         (c >= '0' && c <= '9') ||
+                         c == '-' || c == '_' || c == '.' || c == '~';
+
+        if (unreserved) {
+            if (w + 1 >= out_size) { out[0] = '\0'; return 0; }
+            out[w++] = (char)c;
+        } else {
+            if (w + 3 >= out_size) { out[0] = '\0'; return 0; }
+            out[w++] = '%';
+            out[w++] = hex[c >> 4];
+            out[w++] = hex[c & 0x0f];
+        }
+    }
+
+    out[w] = '\0';
+    return w;
+}
+
+size_t abs_url_search(const abs_config *cfg, const char *library_id,
+                      const char *query, int limit, char *out, size_t out_size)
+{
+    char encoded[512];
+    if (abs_url_encode(query, encoded, sizeof encoded) == 0) return 0;
+
+    return write_url(out, out_size, "%s/api/libraries/%s/search?q=%s&limit=%d",
+                     cfg->server, library_id, encoded, limit);
+}
+
+int abs_parse_search_items(const char *json, abs_item *out, int max)
+{
+    if (json == NULL || out == NULL || max <= 0) return -1;
+
+    cJSON *root = cJSON_Parse(json);
+    if (root == NULL) return -1;
+
+    /* Hits are wrapped: { "book": [ { "libraryItem": {...} } ] }. */
+    const cJSON *books = cJSON_GetObjectItemCaseSensitive(root, "book");
+    if (!cJSON_IsArray(books)) {
+        cJSON_Delete(root);
+        return -1;
+    }
+
+    int count = 0;
+    const cJSON *hit = NULL;
+    cJSON_ArrayForEach(hit, books) {
+        if (count >= max) break;
+        if (!cJSON_IsObject(hit)) continue;
+
+        const cJSON *li = cJSON_GetObjectItemCaseSensitive(hit, "libraryItem");
+        if (!cJSON_IsObject(li)) continue;
+
+        if (item_from_json(li, &out[count])) count++;
+    }
+
+    cJSON_Delete(root);
+    return count;
+}
+
+int abs_parse_progress(const char *json, double *current_time, double *duration,
+                       int *is_finished)
+{
+    if (json == NULL) return 0;
+
+    cJSON *root = cJSON_Parse(json);
+    if (root == NULL) return 0;
+
+    if (!cJSON_IsObject(root)) { cJSON_Delete(root); return 0; }
+
+    /* An object with none of these fields is not a progress record. */
+    const cJSON *ct = cJSON_GetObjectItemCaseSensitive(root, "currentTime");
+    if (!cJSON_IsNumber(ct)) { cJSON_Delete(root); return 0; }
+
+    if (current_time != NULL) *current_time = ct->valuedouble;
+    if (duration != NULL)     *duration = number_field(root, "duration");
+    if (is_finished != NULL) {
+        *is_finished = cJSON_IsTrue(
+            cJSON_GetObjectItemCaseSensitive(root, "isFinished"));
+    }
+
+    cJSON_Delete(root);
+    return 1;
+}
+
 int abs_parse_items(const char *json, abs_item *out, int max, int *total_out)
 {
     if (json == NULL || out == NULL || max <= 0) return -1;
@@ -323,29 +439,7 @@ int abs_parse_items(const char *json, abs_item *out, int max, int *total_out)
         if (count >= max) break;
         if (!cJSON_IsObject(entry)) continue;
 
-        abs_item item;
-        memset(&item, 0, sizeof item);
-
-        copy_string_field(entry, "id", item.id, sizeof item.id);
-        if (item.id[0] == '\0') continue;
-
-        const cJSON *media = cJSON_GetObjectItemCaseSensitive(entry, "media");
-        if (cJSON_IsObject(media)) {
-            item.duration   = number_field(media, "duration");
-            item.num_tracks = (int)number_field(media, "numTracks");
-
-            const cJSON *meta = cJSON_GetObjectItemCaseSensitive(media, "metadata");
-            if (cJSON_IsObject(meta)) {
-                copy_string_field(meta, "title", item.title, sizeof item.title);
-                copy_string_field(meta, "authorName", item.author, sizeof item.author);
-            }
-        }
-
-        if (item.title[0] == '\0') {
-            snprintf(item.title, sizeof item.title, "%s", "(untitled)");
-        }
-
-        out[count++] = item;
+        if (item_from_json(entry, &out[count])) count++;
     }
 
     cJSON_Delete(root);
@@ -415,7 +509,6 @@ int abs_parse_item_detail(const char *json, abs_item_detail *out)
                 }
                 if (t.ino[0] == '\0') continue;   /* cannot be fetched */
 
-                t.index    = (int)number_field(entry, "index");
                 t.duration = number_field(entry, "duration");
 
                 const cJSON *meta = cJSON_GetObjectItemCaseSensitive(entry, "metadata");
@@ -478,7 +571,8 @@ void abs_format_size(long long bytes, char *out, size_t out_size)
     double gb = (double)bytes / (1024.0 * 1024.0 * 1024.0);
     double mb = (double)bytes / (1024.0 * 1024.0);
 
-    if (gb >= 1.0) {
+    /* Compare against the rounded value, or 1073741823 bytes prints "1024 MB". */
+    if (mb >= 1023.5) {
         snprintf(out, out_size, "%.1f GB", gb);
     } else if (mb >= 1.0) {
         snprintf(out, out_size, "%.0f MB", mb);

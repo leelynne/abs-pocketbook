@@ -22,6 +22,9 @@ static char    part_path[ABS_MAX_DIR + ABS_MAX_NAME + 16];
 static char    final_path[ABS_MAX_DIR + ABS_MAX_NAME + 8];
 static char    target_dir[ABS_MAX_DIR];
 
+/* Bytes already on disk for the track in flight; 0 when starting fresh. */
+static long long       track_resume_from;
+
 static abs_config      dl_cfg;
 static abs_item_detail dl_item;
 static long long       completed_bytes;   /* tracks finished before this one */
@@ -117,12 +120,33 @@ static size_t write_cb(char *ptr, size_t size, size_t nmemb, void *userdata)
 
 static int start_track(int index)
 {
-    if (index >= dl_item.track_count) {
-        finish(DL_DONE, "Download complete.");
-        return 0;
+    const abs_track *t;
+
+    /* Skip anything already complete. This was recursion, which for a fully
+     * downloaded 100-track book meant 100 stack frames to do nothing. */
+    for (;;) {
+        if (index >= dl_item.track_count) {
+            finish(DL_DONE, "Download complete.");
+            return 0;
+        }
+
+        char probe_name[ABS_MAX_NAME];
+        char probe_path[ABS_MAX_DIR + ABS_MAX_NAME + 8];
+        struct stat probe;
+
+        abs_sanitize_component(dl_item.tracks[index].filename, probe_name,
+                               sizeof probe_name);
+        snprintf(probe_path, sizeof probe_path, "%s/%s", target_dir, probe_name);
+
+        if (stat(probe_path, &probe) != 0 || probe.st_size <= 0) break;
+
+        abs_log("skip existing %s", probe_name);
+        completed_bytes += probe.st_size;
+        status.done_bytes = completed_bytes;
+        index++;
     }
 
-    const abs_track *t = &dl_item.tracks[index];
+    t = &dl_item.tracks[index];
     char safe_name[ABS_MAX_NAME];
     abs_sanitize_component(t->filename, safe_name, sizeof safe_name);
 
@@ -132,14 +156,7 @@ static int start_track(int index)
     status.track_index = index;
     snprintf(status.current_name, sizeof status.current_name, "%s", safe_name);
 
-    /* Already downloaded in a previous run? Skip it. */
     struct stat sb;
-    if (stat(final_path, &sb) == 0 && sb.st_size > 0) {
-        abs_log("skip existing %s", safe_name);
-        completed_bytes += sb.st_size;
-        status.done_bytes = completed_bytes;
-        return start_track(index + 1);
-    }
 
     /* Resume a partial file rather than starting over -- these are big, and
      * a dropped connection two thirds of the way through is common. */
@@ -148,6 +165,7 @@ static int start_track(int index)
         resume_from = sb.st_size;
         abs_log("resuming %s at %lld bytes", safe_name, resume_from);
     }
+    track_resume_from = resume_from;
 
     out_file = fopen(part_path, resume_from > 0 ? "ab" : "wb");
     if (out_file == NULL) {
@@ -181,7 +199,6 @@ static int start_track(int index)
 
     if (resume_from > 0) {
         curl_easy_setopt(easy, CURLOPT_RESUME_FROM_LARGE, (curl_off_t)resume_from);
-        completed_bytes -= 0;   /* resume bytes are counted via ftell */
     }
     if (dl_cfg.insecure) {
         curl_easy_setopt(easy, CURLOPT_SSL_VERIFYPEER, 0L);
@@ -196,6 +213,10 @@ static int start_track(int index)
 int abs_dl_start(const abs_config *cfg, const abs_item_detail *item,
                  const char *dir)
 {
+    /* Starting a second transfer would strand the first one's CURLM, CURL and
+     * FILE* and orphan its half-written .part. */
+    if (status.state == DL_RUNNING) return 0;
+
     memset(&status, 0, sizeof status);
 
     if (item->track_count <= 0) {
@@ -281,6 +302,20 @@ int abs_dl_pump(void)
             snprintf(err, sizeof err, "Server refused the file (HTTP %ld).", http_code);
             finish(DL_FAILED, err);
             return 0;
+        }
+
+        /*
+         * We asked to resume, so the server must answer 206 Partial Content.
+         * A 200 means it ignored the Range header and sent the whole file,
+         * which we just appended to the bytes already on disk -- the result is
+         * corrupt. Throw the partial away and start that track over.
+         */
+        if (track_resume_from > 0 && http_code != 206) {
+            abs_log("resume rejected (HTTP %ld); restarting track", http_code);
+            unlink(part_path);
+            track_resume_from = 0;
+            if (!start_track(status.track_index)) return 0;
+            continue;
         }
 
         /* Only now is the file whole, so only now does it get its real name.

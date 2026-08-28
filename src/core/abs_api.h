@@ -26,9 +26,6 @@ size_t abs_url_item_cover(const abs_config *cfg, const char *item_id,
                           char *out, size_t out_size);
 
 /* Value for the Authorization header, e.g. "Authorization: Bearer eyJ...". */
-size_t abs_auth_header(const abs_config *cfg, char *out, size_t out_size);
-
-/* Auth header from an explicit token (used mid-sign-in, before we have a key). */
 size_t abs_auth_header_token(const char *token, char *out, size_t out_size);
 
 /* Note: login lives at /login, NOT /api/login -- it is mounted above the
@@ -63,7 +60,6 @@ typedef struct {
     char   title[ABS_MAX_NAME];
     char   author[ABS_MAX_NAME];
     double duration;        /* seconds */
-    int    num_tracks;
 } abs_item;
 
 #define ABS_MAX_TRACKS 64
@@ -74,7 +70,6 @@ typedef struct {
     char      filename[ABS_MAX_NAME];
     long long size;                   /* bytes */
     double    duration;               /* seconds */
-    int       index;                  /* 1-based track order from the server */
 } abs_track;
 
 /* Everything the detail screen shows. Fetched one at a time. */
@@ -100,7 +95,7 @@ typedef struct {
 /*
  * GET /api/libraries/:id/items -- one page of a library.
  *
- * `sort` may be NULL for the server default. Pagination is zero-based.
+ * Pagination is zero-based; the sort key is fixed to title.
  */
 size_t abs_url_library_items(const abs_config *cfg, const char *library_id,
                              int page, int limit, char *out, size_t out_size);
@@ -120,11 +115,37 @@ size_t abs_url_track_download(const abs_config *cfg, const char *item_id,
                               const char *ino, char *out, size_t out_size);
 
 /*
+ * Percent-encode `in` for use in a query string. Returns length written, or 0
+ * if it would not fit. Everything outside the unreserved set is encoded, so a
+ * search for "Herbert & Sons" cannot truncate the URL at the ampersand.
+ */
+size_t abs_url_encode(const char *in, char *out, size_t out_size);
+
+/* GET /api/libraries/:id/search?q=... */
+size_t abs_url_search(const abs_config *cfg, const char *library_id,
+                      const char *query, int limit, char *out, size_t out_size);
+
+/*
  * Parse a page of library items. Returns the count written, or -1 on a body
  * we do not recognise. `total_out` (optional) receives the server's total item
  * count, which is what drives paging.
  */
 int abs_parse_items(const char *json, abs_item *out, int max, int *total_out);
+
+/*
+ * Parse a search response. Same item shape as abs_parse_items, but the server
+ * wraps each hit: { "book": [ { "libraryItem": {...} } ], ... }.
+ */
+int abs_parse_search_items(const char *json, abs_item *out, int max);
+
+/*
+ * Parse GET /api/me/progress/:id.
+ *
+ * The server returns the progress object directly, and 404 when there is none
+ * -- so callers must treat 404 as "no progress", not an error.
+ */
+int abs_parse_progress(const char *json, double *current_time, double *duration,
+                       int *is_finished);
 
 /* Parse a single expanded library item. Returns 1 on success. */
 int abs_parse_item_detail(const char *json, abs_item_detail *out);
