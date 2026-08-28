@@ -33,9 +33,21 @@ LDFLAGS = -L$(SYSROOT)/usr/local/lib \
           -L$(SYSROOT)/usr/lib \
           -linkview -lcurl -lfreetype -lm -ldl
 
-.PHONY: all clean test FORCE
+.PHONY: all clean test spike FORCE
 
 all: $(BUILD_DIR)/$(APP_NAME)
+
+# Throwaway hardware probe for the firmware audio player -- see spike/.
+# Deliberately a separate binary so it cannot destabilise the real app.
+SPIKE_NAME = ABSSpike.app
+
+spike: $(BUILD_DIR)/$(SPIKE_NAME)
+
+$(BUILD_DIR)/$(SPIKE_NAME): spike/spike_main.c
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
+	@echo "--- built $@ ---"
+	@file $@
 
 $(BUILD_DIR)/$(APP_NAME): $(OBJ)
 	$(CC) -o $@ $^ $(LDFLAGS)

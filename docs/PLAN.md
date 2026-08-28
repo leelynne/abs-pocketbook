@@ -119,69 +119,89 @@ want listening stats.
 Files are addressed by **inode** (`audioFiles[].ino`), not track index — see
 `AudioTrack.setData` building `/api/items/${itemId}/file/${audioFile.ino}`.
 
-## 5. The playback handoff (the part with real design in it)
+## 5. The playback handoff — REVISED after hardware testing
 
-ABS stores `currentTime` as **seconds from the start of the whole book**. The firmware
-player reports position **within the current track**. The bridge is
-`audioTracks[i].startOffset`, which ABS gives us per track.
+The original design here was wrong, and the spike (`spike/spike_main.c`) proved it.
+What follows is what the device actually does.
+
+### What does not work
+
+**Our app cannot stay alive during playback.** `PlayFile()` never returns — the log line
+after the call never prints, and the app restarts seconds later. This holds with *or
+without* `OpenPlayer()`. The firmware hands the screen to its player and terminates us,
+exactly as the Home key does.
+
+**The player getters crash if no player exists.** `GetPlayerState`, `GetTrackPosition`,
+`GetTrackSize` and `GetCurrentTrack` killed the spike one second into a cold start.
+Never call them speculatively.
+
+Together these kill the polling design: there is no moment at which our code is running,
+a player exists, and we can read its position. `GetTrackPosition()` is unusable to us.
+
+### What does work
+
+**The firmware records position in SQLite, and we can read it.**
+`system/config/audiobooks/audiobooks.db`:
 
 ```
-global_time  = startOffset[current_track] + GetTrackPosition()
-resume:      find i where startOffset[i] <= t < startOffset[i] + duration[i]
-             PlayTrack(i); SetTrackPosition(t - startOffset[i])
-```
-
-Single-file M4B is the degenerate case (one track, `startOffset = 0`) — but implement the
-general form from day one, because retrofitting it touches the manifest, the sync loop,
-the chapter list and the resume path all at once.
-
-Flow:
-
-1. `OpenPlayer()`, `LoadPlaylist()` with the book's files in track order.
-2. `PlayTrack(i)`, then seek. **Seek after playback has actually started** — expect to
-   have to wait for `EVT_MP_STATECHANGED` with `MP_PLAYING` before `SetTrackPosition()`
-   takes (spike S2).
-3. `SetWeakTimer` every ~5 s: read position, update the manifest on disk.
-4. `PATCH` progress to ABS on: pause, track change, screen exit, and every ~60 s while
-   playing. Never on the 5 s tick — that would hammer the server and the radio.
-5. On `EVT_MP_TRACKCHANGED`, recompute the global offset from the new track index.
-
-### The firmware keeps its own audiobook database
-
-Found on the device at `system/config/audiobooks/audiobooks.db` — a SQLite file the
-stock player owns:
-
-```sql
 audiobooks(id, type, title, artist, genre, duration, added_timestamp)
 files(id, book_id, filename, folder_id, duration)
+folders(id, storageid, name)              -- name is the absolute directory
 chapters(book_id, no, file_id, start_position, end_position, title)
 book_state(id, book_id, read_position TEXT, read_percents, last_read_ts)
-bookmarks(id, book_id, position, location, title, note)
 ```
 
-This matters for two reasons.
+Observed after playing a book natively for ~40 seconds:
 
-**It is a second, durable source of position.** `book_state.read_position` persists
-whatever the stock player reached, including listening the user did entirely outside our
-app — which `GetTrackPosition()` polling can never see, because our app was not running.
-Reading it on launch closes that hole and gives us a cross-check against our own manifest.
+```
+book_state: read_position = "/mnt/ext1/Audio Books/Spike Test/The Message.m4b:#loc(39)"
+```
 
-**Treat it as read-only.** The firmware owns this file and holds a lock
-(`audiobooks.db.lock`, plus WAL). We read it to learn where the user got to; we do not
-write positions into it. Anything we want to persist goes in our own manifest.
+So the format is `<absolute path>:#loc(<position>)`. PocketBook uses this
+`path:#scheme(arg)` convention elsewhere too — zip members appear as
+`book.zip:#zip(track01.mp3)`.
 
-`read_position` is TEXT rather than an integer, so it encodes something structured
-(file plus offset, most likely) — see spike S9.
+**Mind the units — they are not consistent within this one database.**
+`audiobooks.duration` is **seconds** (19222 for a 5h20m book) while
+`chapters.start_position`/`end_position` are **milliseconds** (0, 10000, 17000, ...).
+`#loc(39)` after ~40 seconds of listening reads as **seconds**, but that rests on a
+single observation and needs one more (S10).
 
-Also from `audiobooks.cfg`: the player scans **`/mnt/ext1/Audio Books`**. Downloads go
-there, not to a folder of our own naming, or books never appear in the stock UI.
+**Read the WAL or you will read nothing.** The database is in WAL mode. Copying only
+`audiobooks.db` showed zero rows in every table while the real data sat in
+`audiobooks.db-wal`. This nearly produced the wrong conclusion — that the firmware
+records nothing. Any reader must open the live database (so SQLite picks up the sidecar),
+or copy `.db`, `.db-wal` and `.db-shm` together.
 
-**Sync conflict policy: furthest position wins**, with one guard — if the server says
-`isFinished: true` and local position is *earlier*, prompt before overwriting. Cheap to
-implement, and it is the policy the KOReader prior art landed on after the same analysis.
+**The firmware indexes our downloads by itself.** Files copied into
+`/mnt/ext1/Audio Books/...` were picked up with no action from us: rows appeared in
+`folders`, `audiobooks`, `files` and `chapters`. M4B is fully supported, chapters
+included — 25 chapter rows were extracted from the test book.
 
-Write progress to the local manifest *before* attempting the network call, so a failed
-`PATCH` (wifi asleep, server down) is retried on next launch rather than lost.
+`libsqlite3` ships in the SDK sysroot (header, shared and static). Link the **static**
+library: the firmware plainly uses SQLite, but its rootfs is not visible over USB so we
+cannot confirm the runtime `.so` is present, and 800 KB removes the doubt entirely.
+
+### The design this implies
+
+```
+download  ->  /mnt/ext1/Audio Books/<Author> - <Title>/
+              firmware indexes it on its own
+hand off  ->  PlayFile(); our app is terminated (this is fine, and expected)
+next run  ->  read audiobooks.db (+WAL), map path -> ABS item, PATCH progress
+```
+
+Progress sync becomes **deferred and one-way on launch** rather than live. That is a
+better fit for the platform anyway: it captures listening the user did entirely outside
+our app, through the stock audiobook player, which live polling never could.
+
+Mapping back from a path to an ABS item is ours to maintain: the manifest records which
+directory each downloaded item lives in, so `book_state.read_position` resolves to a
+library item id.
+
+Reading the database concurrently with the firmware is safe (WAL permits readers), but we
+open **read-only** and never write. Writing a position — which is what device-resume from
+another device's progress would need — is a separate, riskier question (S11).
 
 ## 6. On-device layout
 
@@ -312,20 +332,25 @@ storage summary, error dialogs that never leave a dead screen.
 These are the unknowns that can invalidate the design. Each is one short test app.
 (S8 is already resolved; S7 and S9 were opened or narrowed by inspecting a real device.)
 
-- **S1 — What unit is `GetTrackPosition()`?** Seconds, milliseconds, or samples. Play a
-  file of known duration, print position and `GetTrackSize()`. One run answers it
-  permanently. *Everything in §5 is written in whatever unit this returns.*
-- **S2 — Does `SetTrackPosition()` stick before playback starts?** If seeking immediately
-  after `PlayTrack()` is ignored, resume must be deferred until `MP_PLAYING`.
-- **S3 — Can we read position cross-task while our UI is foreground?** The whole sync
-  design assumes yes (separate `MPLAYERTASK` + `EVT_MP_*` events say it should). If not,
-  fall back to writing position on `EVT_BACKGROUND`/`EVT_MP_STATECHANGED` only.
-- **S4 — Does `LoadPlaylist()` work from a third-party app,** and does `GetCurrentTrack()`
-  track correctly across auto-advance? Fallback: single-file `PlayFile()` per track with
-  manual advance on `MP_TRACK_FINISHED`.
-- **S5 — Does the firmware player handle M4B** (AAC in MP4) and does it expose embedded
-  chapters? If chapters are not exposed, drive them from ABS's chapter list instead —
-  which is preferable anyway since ABS chapter times are already global.
+- ~~**S1 — What unit is `GetTrackPosition()`?**~~ **Moot.** The getter is unusable: our
+  app is terminated before it can ever be called during playback. Units now matter only
+  for the database, where `duration` is seconds and `chapters` are milliseconds.
+- ~~**S2 — Does `SetTrackPosition()` stick before playback starts?**~~ **Moot**, same
+  reason.
+- ~~**S3 — Can we read position cross-task?**~~ **Answered: no, not by polling.** Position
+  comes from `audiobooks.db` instead.
+- ~~**S4 — Does `LoadPlaylist()` work from a third-party app?**~~ **Moot** for position;
+  still open for whether a multi-file book plays in order, but the firmware's own indexer
+  groups files into one book, so the stock player handles ordering for us.
+- ~~**S5 — Does the firmware player handle M4B and expose chapters?**~~ **Answered: yes to
+  both.** 25 chapter rows were extracted from the test M4B automatically.
+- **S10 — Confirm `#loc(N)` is seconds.** One observation (39 after ~40s) supports it.
+  Play a book to a known position, force-close, and re-read the row. Getting this wrong
+  scales every synced position by 1000.
+- **S11 — Can we write `book_state` to seed a resume position?** Needed only for
+  server-to-device sync (continue where another device left off). The firmware owns the
+  file and holds a lock; this is the risky direction and should be attempted last, with
+  the player not running.
 - **S6 — (optional, high value) Does `PlayFile("http://…?token=…")` work?** The backend is
   mplayer-derived, which can do HTTP. If it works, streaming is a v2 feature. If not,
   nothing is lost. Do not let this hold up M3.
