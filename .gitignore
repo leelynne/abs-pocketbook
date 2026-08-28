@@ -6,6 +6,9 @@ build/
 *.o
 *.app
 
+# Snapshots of device firmware config taken before edits
+device-backup/
+
 # Editor / OS
 .DS_Store
 .#*

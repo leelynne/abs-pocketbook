@@ -53,6 +53,80 @@ typedef struct {
  */
 int abs_parse_libraries(const char *json, abs_library *out, int max);
 
+/* -------------------------------------------------------------- browsing -- */
+
+#define ABS_MAX_DESC 4096
+
+/* A row in the library list. Kept small: hundreds of these may be resident. */
+typedef struct {
+    char   id[ABS_MAX_ID];
+    char   title[ABS_MAX_NAME];
+    char   author[ABS_MAX_NAME];
+    double duration;        /* seconds */
+    int    num_tracks;
+} abs_item;
+
+/* Everything the detail screen shows. Fetched one at a time. */
+typedef struct {
+    char      id[ABS_MAX_ID];
+    char      title[ABS_MAX_NAME];
+    char      subtitle[ABS_MAX_NAME];
+    char      author[ABS_MAX_NAME];
+    char      narrator[ABS_MAX_NAME];
+    char      series[ABS_MAX_NAME];
+    char      published_year[16];
+    double    duration;
+    long long size;         /* bytes */
+    int       num_tracks;
+    int       num_chapters;
+    char      description[ABS_MAX_DESC];
+} abs_item_detail;
+
+/*
+ * GET /api/libraries/:id/items -- one page of a library.
+ *
+ * `sort` may be NULL for the server default. Pagination is zero-based.
+ */
+size_t abs_url_library_items(const abs_config *cfg, const char *library_id,
+                             int page, int limit, char *out, size_t out_size);
+
+/* GET /api/items/:id?expanded=1 */
+size_t abs_url_item(const abs_config *cfg, const char *item_id,
+                    char *out, size_t out_size);
+
+/*
+ * Parse a page of library items. Returns the count written, or -1 on a body
+ * we do not recognise. `total_out` (optional) receives the server's total item
+ * count, which is what drives paging.
+ */
+int abs_parse_items(const char *json, abs_item *out, int max, int *total_out);
+
+/* Parse a single expanded library item. Returns 1 on success. */
+int abs_parse_item_detail(const char *json, abs_item_detail *out);
+
+/* --------------------------------------------------------------- display -- */
+
+/*
+ * Render a duration as "3h 24m" / "47m" / "38s".
+ *
+ * Audiobook lengths are the one number a reader actually scans for, so this
+ * never prints raw seconds.
+ */
+void abs_format_duration(double seconds, char *out, size_t out_size);
+
+/* Render a byte count as "1.4 GB" / "312 MB". */
+void abs_format_size(long long bytes, char *out, size_t out_size);
+
+/*
+ * Flatten HTML into plain text.
+ *
+ * Descriptions scraped from Audible routinely contain <p>, <br> and named
+ * entities. inkview's DrawTextRect has no notion of markup, so tags would be
+ * rendered literally. Drops tags, decodes the handful of entities that
+ * actually show up, and collapses whitespace runs.
+ */
+void abs_strip_html(const char *in, char *out, size_t out_size);
+
 /* ------------------------------------------------------------ sign-in --- */
 
 #define ABS_MAX_USERNAME 128

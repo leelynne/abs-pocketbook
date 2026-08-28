@@ -250,3 +250,264 @@ int abs_parse_api_key(const char *json, char *key_out, size_t key_size)
     cJSON_Delete(root);
     return ok;
 }
+
+/* -------------------------------------------------------------- browsing -- */
+
+size_t abs_url_library_items(const abs_config *cfg, const char *library_id,
+                             int page, int limit, char *out, size_t out_size)
+{
+    return write_url(out, out_size,
+                     "%s/api/libraries/%s/items?limit=%d&page=%d&sort=media.metadata.title",
+                     cfg->server, library_id, limit, page);
+}
+
+size_t abs_url_item(const abs_config *cfg, const char *item_id,
+                    char *out, size_t out_size)
+{
+    return write_url(out, out_size, "%s/api/items/%s?expanded=1",
+                     cfg->server, item_id);
+}
+
+static double number_field(const cJSON *obj, const char *key)
+{
+    const cJSON *item = cJSON_GetObjectItemCaseSensitive(obj, key);
+    return cJSON_IsNumber(item) ? item->valuedouble : 0.0;
+}
+
+/*
+ * publishedYear arrives as a string on some items and a number on others,
+ * depending on where the metadata came from.
+ */
+static void copy_year_field(const cJSON *obj, const char *key,
+                            char *dst, size_t dst_size)
+{
+    const cJSON *item = cJSON_GetObjectItemCaseSensitive(obj, key);
+    dst[0] = '\0';
+
+    if (cJSON_IsString(item) && item->valuestring != NULL) {
+        snprintf(dst, dst_size, "%s", item->valuestring);
+    } else if (cJSON_IsNumber(item) && item->valuedouble > 0) {
+        snprintf(dst, dst_size, "%d", (int)item->valuedouble);
+    }
+}
+
+int abs_parse_items(const char *json, abs_item *out, int max, int *total_out)
+{
+    if (json == NULL || out == NULL || max <= 0) return -1;
+
+    if (total_out != NULL) *total_out = 0;
+
+    cJSON *root = cJSON_Parse(json);
+    if (root == NULL) return -1;
+
+    const cJSON *results = cJSON_GetObjectItemCaseSensitive(root, "results");
+    if (!cJSON_IsArray(results)) {
+        cJSON_Delete(root);
+        return -1;
+    }
+
+    if (total_out != NULL) {
+        *total_out = (int)number_field(root, "total");
+    }
+
+    int count = 0;
+    const cJSON *entry = NULL;
+    cJSON_ArrayForEach(entry, results) {
+        if (count >= max) break;
+        if (!cJSON_IsObject(entry)) continue;
+
+        abs_item item;
+        memset(&item, 0, sizeof item);
+
+        copy_string_field(entry, "id", item.id, sizeof item.id);
+        if (item.id[0] == '\0') continue;
+
+        const cJSON *media = cJSON_GetObjectItemCaseSensitive(entry, "media");
+        if (cJSON_IsObject(media)) {
+            item.duration   = number_field(media, "duration");
+            item.num_tracks = (int)number_field(media, "numTracks");
+
+            const cJSON *meta = cJSON_GetObjectItemCaseSensitive(media, "metadata");
+            if (cJSON_IsObject(meta)) {
+                copy_string_field(meta, "title", item.title, sizeof item.title);
+                copy_string_field(meta, "authorName", item.author, sizeof item.author);
+            }
+        }
+
+        if (item.title[0] == '\0') {
+            snprintf(item.title, sizeof item.title, "%s", "(untitled)");
+        }
+
+        out[count++] = item;
+    }
+
+    cJSON_Delete(root);
+    return count;
+}
+
+int abs_parse_item_detail(const char *json, abs_item_detail *out)
+{
+    if (json == NULL || out == NULL) return 0;
+
+    memset(out, 0, sizeof *out);
+
+    cJSON *root = cJSON_Parse(json);
+    if (root == NULL) return 0;
+
+    /* The expanded item is the root object, not wrapped in a envelope. */
+    copy_string_field(root, "id", out->id, sizeof out->id);
+    if (out->id[0] == '\0') {
+        cJSON_Delete(root);
+        return 0;
+    }
+
+    const cJSON *media = cJSON_GetObjectItemCaseSensitive(root, "media");
+    if (cJSON_IsObject(media)) {
+        out->duration     = number_field(media, "duration");
+        out->size         = (long long)number_field(media, "size");
+        out->num_tracks   = (int)number_field(media, "numTracks");
+        out->num_chapters = (int)number_field(media, "numChapters");
+
+        const cJSON *meta = cJSON_GetObjectItemCaseSensitive(media, "metadata");
+        if (cJSON_IsObject(meta)) {
+            copy_string_field(meta, "title", out->title, sizeof out->title);
+            copy_string_field(meta, "subtitle", out->subtitle, sizeof out->subtitle);
+            copy_string_field(meta, "authorName", out->author, sizeof out->author);
+            copy_string_field(meta, "narratorName", out->narrator, sizeof out->narrator);
+            copy_string_field(meta, "seriesName", out->series, sizeof out->series);
+            copy_year_field(meta, "publishedYear", out->published_year,
+                            sizeof out->published_year);
+
+            /* Descriptions carry markup; flatten before anyone tries to draw it. */
+            const cJSON *desc = cJSON_GetObjectItemCaseSensitive(meta, "description");
+            if (cJSON_IsString(desc) && desc->valuestring != NULL) {
+                abs_strip_html(desc->valuestring, out->description,
+                               sizeof out->description);
+            }
+        }
+    }
+
+    if (out->title[0] == '\0') {
+        snprintf(out->title, sizeof out->title, "%s", "(untitled)");
+    }
+
+    cJSON_Delete(root);
+    return 1;
+}
+
+/* --------------------------------------------------------------- display -- */
+
+void abs_format_duration(double seconds, char *out, size_t out_size)
+{
+    if (out == NULL || out_size == 0) return;
+
+    if (!(seconds > 0)) {              /* also catches NaN */
+        snprintf(out, out_size, "%s", "--");
+        return;
+    }
+
+    long total = (long)(seconds + 0.5);
+    long hours = total / 3600;
+    long mins  = (total % 3600) / 60;
+
+    if (hours > 0) {
+        snprintf(out, out_size, "%ldh %ldm", hours, mins);
+    } else if (mins > 0) {
+        snprintf(out, out_size, "%ldm", mins);
+    } else {
+        snprintf(out, out_size, "%lds", total);
+    }
+}
+
+void abs_format_size(long long bytes, char *out, size_t out_size)
+{
+    if (out == NULL || out_size == 0) return;
+
+    if (bytes <= 0) {
+        snprintf(out, out_size, "%s", "--");
+        return;
+    }
+
+    double gb = (double)bytes / (1024.0 * 1024.0 * 1024.0);
+    double mb = (double)bytes / (1024.0 * 1024.0);
+
+    if (gb >= 1.0) {
+        snprintf(out, out_size, "%.1f GB", gb);
+    } else if (mb >= 1.0) {
+        snprintf(out, out_size, "%.0f MB", mb);
+    } else {
+        snprintf(out, out_size, "%.0f KB", (double)bytes / 1024.0);
+    }
+}
+
+/* The entities that actually turn up in scraped book descriptions. */
+static int decode_entity(const char *p, const char **after, char *decoded)
+{
+    static const struct { const char *name; char ch; } table[] = {
+        { "&amp;",  '&'  }, { "&lt;",   '<' }, { "&gt;",  '>' },
+        { "&quot;", '"'  }, { "&apos;", '\'' }, { "&#39;", '\'' },
+        { "&nbsp;", ' '  },
+    };
+
+    for (size_t i = 0; i < sizeof table / sizeof table[0]; i++) {
+        size_t len = strlen(table[i].name);
+        if (strncmp(p, table[i].name, len) == 0) {
+            *decoded = table[i].ch;
+            *after = p + len;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+void abs_strip_html(const char *in, char *out, size_t out_size)
+{
+    size_t w = 0;
+    int pending_space = 0;
+
+    if (out == NULL || out_size == 0) return;
+    if (in == NULL) { out[0] = '\0'; return; }
+
+    for (const char *p = in; *p != '\0'; ) {
+        if (*p == '<') {
+            /* <br> and </p> are paragraph breaks worth keeping as spaces;
+             * everything else just disappears. */
+            const char *close = strchr(p, '>');
+            if (close == NULL) break;          /* unterminated tag: drop rest */
+            if (w > 0) pending_space = 1;
+            p = close + 1;
+            continue;
+        }
+
+        char decoded;
+        const char *after;
+        if (*p == '&' && decode_entity(p, &after, &decoded)) {
+            if (decoded == ' ') {
+                if (w > 0) pending_space = 1;
+            } else {
+                if (pending_space && w + 1 < out_size) { out[w++] = ' '; pending_space = 0; }
+                if (w + 1 >= out_size) break;
+                out[w++] = decoded;
+            }
+            p = after;
+            continue;
+        }
+
+        if (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') {
+            if (w > 0) pending_space = 1;
+            p++;
+            continue;
+        }
+
+        if (pending_space) {
+            if (w + 1 >= out_size) break;
+            out[w++] = ' ';
+            pending_space = 0;
+        }
+
+        if (w + 1 >= out_size) break;
+        out[w++] = *p++;
+    }
+
+    out[w] = '\0';
+}

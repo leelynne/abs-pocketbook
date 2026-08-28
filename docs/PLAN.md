@@ -252,6 +252,23 @@ against a real server. Two things changed from the plan as written:
 - **`scripts/configure-device.sh`** remains as the no-typing path: it writes
   `abs_client.cfg` straight to the mounted device.
 
+**Do not register the app in the launcher's `view.json`.** Tried and reverted. The
+firmware documents the mechanism in its own `system/config/desktop/view.json` comment
+block -- a `U_`-prefixed entry with `path`, `title` and `icon`, plus the key listed in a
+`view.groups[].apps` array -- and `hash.txt`'s `hash2` is a plain md5 of that file, which
+we can regenerate. What we cannot regenerate is the `#xxxxxxxx` integrity marker
+`hash.txt` itself carries (not crc32, adler32 or a byte sum). With a stale marker the
+launcher did not merely ignore the new entry: **the app disappeared from the Applications
+list entirely**, which is worse than the predicted fallback-to-defaults. Restored from
+`device-backup/`. Revisit only if that checksum is identified; the app is listed by
+filename without any of this, which costs only a nicer title and icon.
+
+**Never make a hardware key the only route to an action.** inkview exposes
+`QueryTouchpanel()` but has no equivalent for hardware keys, so an app cannot detect
+whether the device it is running on has page or back buttons -- and users can remap the
+ones that exist. Every key binding needs a touch equivalent: a back chevron in the header,
+on-screen pager buttons, tap-zones for scrolling. Keys stay as an accelerator.
+
 **Never block inside an inkview event handler.** This cost a debugging round in M1 and will
 cost more later, so it is a rule, not a note. inkview finishes its own show sequence after
 your handler returns; blocking inside `EVT_SHOW` means the panel never flushes what you

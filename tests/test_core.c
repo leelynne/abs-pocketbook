@@ -8,6 +8,7 @@
 #include "core/abs_api.h"
 #include "core/config.h"
 #include "core/paths.h"
+#include "core/state.h"
 #include "core/version.h"
 
 static int failures = 0;
@@ -65,7 +66,8 @@ static void test_version(void)
 {
     printf("abs_version_string:\n");
     const char *v = abs_version_string();
-    if (v == NULL || strstr(v, ABS_CLIENT_VERSION) == NULL) {
+    if (v == NULL || strstr(v, ABS_CLIENT_VERSION) == NULL ||
+        strstr(v, "build") == NULL) {
         printf("  FAIL version string missing %s\n", ABS_CLIENT_VERSION);
         failures++;
     } else {
@@ -341,6 +343,188 @@ static void test_signin_urls(void)
     check_str("explicit bearer", buf, "Authorization: Bearer tok");
 }
 
+static void test_format(void)
+{
+    char buf[32];
+
+    printf("formatting:\n");
+
+    abs_format_duration(12240, buf, sizeof buf);   check_str("3h 24m", buf, "3h 24m");
+    abs_format_duration(2820, buf, sizeof buf);    check_str("47m", buf, "47m");
+    abs_format_duration(38, buf, sizeof buf);      check_str("38s", buf, "38s");
+    abs_format_duration(0, buf, sizeof buf);       check_str("zero", buf, "--");
+    abs_format_duration(-5, buf, sizeof buf);      check_str("negative", buf, "--");
+    /* Rounding must not produce "3h 60m". */
+    abs_format_duration(3599.7, buf, sizeof buf);  check_str("rounds to 1h", buf, "1h 0m");
+
+    abs_format_size(1503238553LL, buf, sizeof buf); check_str("GB", buf, "1.4 GB");
+    abs_format_size(327155712LL, buf, sizeof buf);  check_str("MB", buf, "312 MB");
+    abs_format_size(0, buf, sizeof buf);            check_str("no size", buf, "--");
+}
+
+static void test_strip_html(void)
+{
+    char buf[256];
+
+    printf("abs_strip_html:\n");
+
+    abs_strip_html("<p>Hello <b>world</b>.</p>", buf, sizeof buf);
+    check_str("tags removed", buf, "Hello world .");
+
+    abs_strip_html("Tom &amp; Jerry &lt;3", buf, sizeof buf);
+    check_str("entities decoded", buf, "Tom & Jerry <3");
+
+    abs_strip_html("line one<br/>line two", buf, sizeof buf);
+    check_str("br becomes space", buf, "line one line two");
+
+    abs_strip_html("  lots   of\n\n whitespace  ", buf, sizeof buf);
+    check_str("whitespace collapsed", buf, "lots of whitespace");
+
+    abs_strip_html("plain text", buf, sizeof buf);
+    check_str("plain passthrough", buf, "plain text");
+
+    /* An unterminated tag must not run off the end of the buffer. */
+    abs_strip_html("before <span oops", buf, sizeof buf);
+    check_str("unterminated tag", buf, "before");
+
+    abs_strip_html(NULL, buf, sizeof buf);
+    check_str("null input", buf, "");
+
+    char small[8];
+    abs_strip_html("aaaaaaaaaaaaaaaaaaaa", small, sizeof small);
+    check_int("truncated length", (long)strlen(small), 7);
+}
+
+static void test_parse_items(void)
+{
+    abs_item items[8];
+    int total = -1;
+
+    printf("abs_parse_items:\n");
+
+    const char *body =
+        "{\"results\":["
+        "{\"id\":\"li_1\",\"media\":{\"duration\":12240.5,\"numTracks\":1,"
+        "\"metadata\":{\"title\":\"Dune\",\"authorName\":\"Frank Herbert\"}}},"
+        "{\"id\":\"li_2\",\"media\":{\"duration\":3600,\"numTracks\":12,"
+        "\"metadata\":{\"title\":\"Neuromancer\",\"authorName\":\"William Gibson\"}}}"
+        "],\"total\":57,\"limit\":2,\"page\":0}";
+
+    check_int("count", abs_parse_items(body, items, 8, &total), 2);
+    check_int("total drives paging", total, 57);
+    check_str("title", items[0].title, "Dune");
+    check_str("author", items[0].author, "Frank Herbert");
+    check_int("tracks", items[1].num_tracks, 12);
+
+    /* An item with no media should still list rather than vanish. */
+    check_int("bare item", abs_parse_items("{\"results\":[{\"id\":\"li_3\"}],\"total\":1}",
+                                           items, 8, &total), 1);
+    check_str("untitled fallback", items[0].title, "(untitled)");
+
+    check_int("no id skipped",
+              abs_parse_items("{\"results\":[{\"media\":{}}],\"total\":1}", items, 8, NULL), 0);
+    check_int("wrong shape", abs_parse_items("{\"nope\":1}", items, 8, NULL), -1);
+    check_int("not json", abs_parse_items("<html>", items, 8, NULL), -1);
+}
+
+static void test_parse_item_detail(void)
+{
+    abs_item_detail d;
+
+    printf("abs_parse_item_detail:\n");
+
+    const char *body =
+        "{\"id\":\"li_1\",\"media\":{\"duration\":12240,\"size\":327155712,"
+        "\"numTracks\":1,\"numChapters\":24,"
+        "\"metadata\":{\"title\":\"Dune\",\"subtitle\":\"Book One\","
+        "\"authorName\":\"Frank Herbert\",\"narratorName\":\"Simon Vance\","
+        "\"seriesName\":\"Dune #1\",\"publishedYear\":\"1965\","
+        "\"description\":\"<p>A <i>desert</i> planet &amp; a boy.</p>\"}}}";
+
+    check_int("parses", abs_parse_item_detail(body, &d), 1);
+    check_str("title", d.title, "Dune");
+    check_str("narrator", d.narrator, "Simon Vance");
+    check_str("series", d.series, "Dune #1");
+    check_str("year as string", d.published_year, "1965");
+    check_int("chapters", d.num_chapters, 24);
+    check_str("description flattened", d.description, "A desert planet & a boy.");
+
+    /* publishedYear is a number on some items and a string on others. */
+    check_int("numeric year parses",
+              abs_parse_item_detail("{\"id\":\"x\",\"media\":{\"metadata\":"
+                                    "{\"title\":\"T\",\"publishedYear\":1984}}}", &d), 1);
+    check_str("numeric year", d.published_year, "1984");
+
+    check_int("no id fails", abs_parse_item_detail("{\"media\":{}}", &d), 0);
+    check_int("not json", abs_parse_item_detail("<html>", &d), 0);
+}
+
+static void test_browse_urls(void)
+{
+    abs_config cfg;
+    char buf[1024];
+
+    printf("browse URLs:\n");
+
+    memset(&cfg, 0, sizeof cfg);
+    snprintf(cfg.server, sizeof cfg.server, "%s", "https://abs.example.com");
+
+    abs_url_library_items(&cfg, "lib_1", 0, 25, buf, sizeof buf);
+    check_str("items page 0", buf,
+              "https://abs.example.com/api/libraries/lib_1/items"
+              "?limit=25&page=0&sort=media.metadata.title");
+
+    abs_url_library_items(&cfg, "lib_1", 3, 25, buf, sizeof buf);
+    check_str("items page 3", buf,
+              "https://abs.example.com/api/libraries/lib_1/items"
+              "?limit=25&page=3&sort=media.metadata.title");
+
+    abs_url_item(&cfg, "li_9", buf, sizeof buf);
+    check_str("expanded item", buf, "https://abs.example.com/api/items/li_9?expanded=1");
+}
+
+static void test_state(void)
+{
+    abs_state in, out;
+    char buf[1024];
+
+    printf("abs_state round-trip:\n");
+
+    memset(&in, 0, sizeof in);
+    in.screen = 3;
+    in.page = 4;
+    snprintf(in.library_id, sizeof in.library_id, "%s", "lib_1");
+    snprintf(in.library_name, sizeof in.library_name, "%s", "My Books");
+    snprintf(in.item_id, sizeof in.item_id, "%s", "li_42");
+
+    size_t n = abs_state_serialize(&in, buf, sizeof buf);
+    check_int("serialized", n > 0, 1);
+
+    abs_state_parse(buf, &out);
+    check_int("screen", out.screen, 3);
+    check_int("page", out.page, 4);
+    check_str("library id", out.library_id, "lib_1");
+    check_str("library name (spaces kept)", out.library_name, "My Books");
+    check_str("item id", out.item_id, "li_42");
+
+    /* Missing or damaged state must degrade to "start at the top". */
+    abs_state_parse("", &out);
+    check_int("empty screen", out.screen, 0);
+    check_str("empty library", out.library_id, "");
+
+    abs_state_parse(NULL, &out);
+    check_int("null input", out.page, 0);
+
+    abs_state_parse("page=-5\nscreen=2\n", &out);
+    check_int("negative page clamped", out.page, 0);
+
+    abs_state_parse("garbage\n\n#comment\nlibrary_id=lib_9\n", &out);
+    check_str("survives junk", out.library_id, "lib_9");
+
+    char tiny[8];
+    check_int("tiny buffer", (long)abs_state_serialize(&in, tiny, sizeof tiny), 0);
+}
+
 int main(void)
 {
     test_sanitize();
@@ -355,6 +539,12 @@ int main(void)
     test_parse_login();
     test_parse_users();
     test_parse_api_key();
+    test_browse_urls();
+    test_format();
+    test_strip_html();
+    test_parse_items();
+    test_parse_item_detail();
+    test_state();
 
     if (failures) {
         printf("\n%d failure(s)\n", failures);
