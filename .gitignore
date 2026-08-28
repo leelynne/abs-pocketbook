@@ -1,0 +1,12 @@
+# PocketBook SDK (large, fetched by scripts/setup-sdk.sh)
+sdk/
+
+# Build output
+build/
+*.o
+*.app
+
+# Editor / OS
+.DS_Store
+.#*
+*~
