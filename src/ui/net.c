@@ -66,7 +66,8 @@ int abs_net_connect(char *err, size_t err_size)
  * and the response cap cannot drift apart between GET and POST.
  */
 static int http_request(const abs_config *cfg, const char *url, const char *body,
-                        const char *bearer, abs_http_response *res, size_t max_bytes)
+                        const char *bearer, abs_http_response *res,
+                        size_t max_bytes, const char *method)
 {
     memset(res, 0, sizeof *res);
 
@@ -104,6 +105,9 @@ static int http_request(const abs_config *cfg, const char *url, const char *body
         curl_easy_setopt(curl, CURLOPT_POST, 1L);
         curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body);
         curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)strlen(body));
+        if (method != NULL) {
+            curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, method);
+        }
     }
 
     if (cfg->insecure) {
@@ -112,7 +116,7 @@ static int http_request(const abs_config *cfg, const char *url, const char *body
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
     }
 
-    abs_log("%s %s", body ? "POST" : "GET", url);   /* body is never logged */
+    abs_log("%s %s", method ? method : (body ? "POST" : "GET"), url);
     CURLcode rc = curl_easy_perform(curl);
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &res->status);
 
@@ -142,19 +146,25 @@ static int http_request(const abs_config *cfg, const char *url, const char *body
 int abs_http_get(const abs_config *cfg, const char *url,
                  abs_http_response *res, size_t max_bytes)
 {
-    return http_request(cfg, url, NULL, cfg->token, res, max_bytes);
+    return http_request(cfg, url, NULL, cfg->token, res, max_bytes, NULL);
 }
 
 int abs_http_get_auth(const abs_config *cfg, const char *url, const char *bearer,
                       abs_http_response *res, size_t max_bytes)
 {
-    return http_request(cfg, url, NULL, bearer, res, max_bytes);
+    return http_request(cfg, url, NULL, bearer, res, max_bytes, NULL);
 }
 
 int abs_http_post_json(const abs_config *cfg, const char *url, const char *body,
                        const char *bearer, abs_http_response *res, size_t max_bytes)
 {
-    return http_request(cfg, url, body, bearer, res, max_bytes);
+    return http_request(cfg, url, body, bearer, res, max_bytes, NULL);
+}
+
+int abs_http_patch_json(const abs_config *cfg, const char *url, const char *body,
+                        const char *bearer, abs_http_response *res, size_t max_bytes)
+{
+    return http_request(cfg, url, body, bearer, res, max_bytes, "PATCH");
 }
 
 void abs_http_free(abs_http_response *res)

@@ -24,6 +24,7 @@ typedef struct {
     double    duration;               /* seconds, from ABS */
     long long size;                   /* bytes on disk */
     int       track_count;
+    double    synced_pos;   /* last position pushed to ABS, seconds */
 } abs_download;
 
 typedef struct {

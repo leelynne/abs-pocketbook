@@ -209,6 +209,35 @@ Reading the database concurrently with the firmware is safe (WAL permits readers
 open **read-only** and never write. Writing a position — which is what device-resume from
 another device's progress would need — is a separate, riskier question (S11).
 
+## 5b. M5 is done — progress syncs to the server
+
+Verified end to end on hardware: listen in the stock AudioBooks app, launch this app, and
+the position appears in Audiobookshelf.
+
+At launch the app opens `audiobooks.db` read-only, reads `book_state.read_position`,
+resolves each path to a library item through the manifest, and `PATCH`es
+`/api/me/progress/:id`. It runs on a timer after the library list paints, never inside an
+event handler.
+
+Policies worth keeping:
+
+- **Never open the database immutable.** `immutable=1` skips the WAL, and the WAL is
+  exactly where recent positions live.
+- **Guard the units.** Both hardware observations read as seconds, but `chapters` in the
+  same database is milliseconds, so the raw value is sanity-checked against the book's
+  duration and reinterpreted as milliseconds if it cannot be seconds. A 1000x error would
+  put the reader six hours into a book they had just started.
+- **Push only on >= 5s of movement**, so relaunching does not resend the same value.
+- **Assert `isFinished` only within 30s of the end.** Finishing a book removes it from
+  Continue Listening, which is destructive to undo.
+- **The server's duration wins** over the firmware's, being authoritative.
+
+`libsqlite3` is linked statically (binary 135 KB -> 880 KB) because the firmware's rootfs
+is not visible over USB and the runtime `.so` cannot be confirmed.
+
+Still device-to-server only. The reverse direction needs to *write* `book_state`, which is
+S11 and deliberately last.
+
 ## 6. On-device layout
 
 ```

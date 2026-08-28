@@ -20,11 +20,13 @@
 #include "core/paths.h"
 #include "core/manifest.h"
 #include "core/state.h"
+#include "core/sync.h"
 #include "core/version.h"
 #include "ui/covers.h"
 #include "ui/downloader.h"
 #include "ui/log.h"
 #include "ui/net.h"
+#include "ui/pbdb.h"
 
 #define MAX_LIBRARIES 32
 #define MAX_USERS     128
@@ -121,6 +123,7 @@ static void cover_tick_cb(void);
 static void start_cover_loading(void);
 static void save_state(void);
 static void dl_pump_cb(void);
+static void sync_cb(void);
 
 /* ---------------------------------------------------------------- config -- */
 
@@ -387,6 +390,20 @@ static void draw_libraries_screen(void)
     draw_header("Libraries");
 
     int y = header_h + row_h / 3;
+
+    /*
+     * Sync reports here, not on the setup screen: this is where the app lands
+     * on launch, and the result was previously written to status_message and
+     * never drawn.
+     */
+    if (status_message[0]) {
+        SetFont(font_hint, DGRAY);
+        DrawTextRect(margin, y, screen_w - margin * 2, row_h / 2,
+                     status_message, ALIGN_LEFT | DOTS);
+        y += row_h / 2 + row_h / 6;
+        DrawLine(margin, y, screen_w - margin, y, LGRAY);
+        y += row_h / 6;
+    }
 
     if (library_count > 0) {
         SetFont(font_body, BLACK);
@@ -840,6 +857,12 @@ static void fetch_libraries(void)
     status_message[0] = '\0';
     abs_log("fetched %d book libraries", n);
 
+    /* Report anything the stock player recorded while we were not running.
+     * Deferred so the list paints first. */
+    if (manifest.count > 0) {
+        SetWeakTimer("abs_sync", sync_cb, 400);
+    }
+
     /* Carry on into wherever the user was when the app was last closed. */
     if (restoring && restore.library_id[0]) {
         for (int i = 0; i < library_count; i++) {
@@ -1246,6 +1269,88 @@ static void dl_pump_cb(void)
     }
 
     if (current_screen == SCREEN_DOWNLOAD) draw_current_screen();
+}
+
+/*
+ * Push listening progress to Audiobookshelf.
+ *
+ * We cannot observe playback as it happens -- the firmware terminates this app
+ * when a book opens -- so this runs at launch and reports what the stock
+ * player recorded since last time. It therefore also captures listening done
+ * entirely outside this app, which live polling never could.
+ */
+static void sync_progress(void)
+{
+    static abs_pb_state states[ABS_MAX_PB_BOOKS];
+
+    int n = abs_pbdb_read_states(states, ABS_MAX_PB_BOOKS);
+    if (n <= 0) return;
+
+    int pushed = 0, dirty = 0, checked = 0;
+
+    for (int i = 0; i < n; i++) {
+        const abs_download *entry =
+            abs_manifest_find_by_path(&manifest, states[i].path);
+        if (entry == NULL) continue;      /* not something we downloaded */
+        checked++;
+
+        /* Prefer the server's duration: it is authoritative, and the
+         * firmware's is derived from the file. */
+        double duration = (entry->duration > 0) ? entry->duration
+                                                : states[i].duration;
+        double pos = abs_sync_position_seconds(states[i].raw_loc, duration);
+
+        if (!abs_sync_should_push(pos, entry->synced_pos)) continue;
+
+        char url[ABS_MAX_URL + 96];
+        char body[256];
+        if (abs_url_progress(&config, entry->item_id, url, sizeof url) == 0) continue;
+        if (abs_build_progress_body(pos, duration, body, sizeof body) == 0) continue;
+
+        abs_http_response res;
+        if (!abs_http_patch_json(&config, url, body, config.token, &res,
+                                 64 * 1024)) {
+            abs_log("sync: %s failed (%s)", entry->title, res.error);
+            continue;
+        }
+
+        long st = res.status;
+        abs_http_free(&res);
+
+        if (st >= 400) {
+            abs_log("sync: %s -> HTTP %ld", entry->title, st);
+            continue;
+        }
+
+        abs_log("sync: %s at %.0fs (raw %.0f)", entry->title, pos,
+                states[i].raw_loc);
+
+        /* Record what we sent so the same position is not pushed again. */
+        abs_download updated = *entry;
+        updated.synced_pos = pos;
+        abs_manifest_put(&manifest, &updated);
+        dirty = 1;
+        pushed++;
+    }
+
+    if (dirty) manifest_save();
+
+    if (pushed > 0) {
+        snprintf(status_message, sizeof status_message,
+                 "Synced progress for %d book%s.", pushed, pushed == 1 ? "" : "s");
+    } else if (checked > 0) {
+        snprintf(status_message, sizeof status_message,
+                 "Progress up to date (%d book%s checked).",
+                 checked, checked == 1 ? "" : "s");
+    }
+}
+
+static void sync_cb(void)
+{
+    sync_progress();
+    if (current_screen == SCREEN_LIBRARIES || current_screen == SCREEN_ITEMS) {
+        draw_current_screen();
+    }
 }
 
 static void autofetch_cb(void)

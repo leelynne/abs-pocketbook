@@ -29,9 +29,14 @@ CFLAGS = -Wall -Wextra -O2 -std=gnu99 \
          -I$(SYSROOT)/usr/include \
          -I$(SYSROOT)/usr/include/freetype2
 
+# sqlite3 is linked statically: the firmware plainly uses SQLite, but its
+# rootfs is not visible over USB so we cannot confirm the runtime .so is
+# present, and ~800 KB removes the doubt.
 LDFLAGS = -L$(SYSROOT)/usr/local/lib \
           -L$(SYSROOT)/usr/lib \
-          -linkview -lcurl -lfreetype -lm -ldl
+          -linkview -lcurl -lfreetype \
+          $(SYSROOT)/usr/lib/libsqlite3.a \
+          -lpthread -lm -ldl
 
 .PHONY: all clean test spike FORCE
 

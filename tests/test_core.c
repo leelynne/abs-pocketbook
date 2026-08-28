@@ -10,6 +10,7 @@
 #include "core/paths.h"
 #include "core/manifest.h"
 #include "core/state.h"
+#include "core/sync.h"
 #include "core/version.h"
 
 static int failures = 0;
@@ -614,6 +615,16 @@ static void test_manifest(void)
     check_str("title", out.items[0].title, "Dune");
     check_int("size", (long)out.items[0].size, 327155712);
 
+    /* Old manifests predate the synced column; they must still load. */
+    abs_manifest parsed_old;
+    abs_manifest_parse("li_5\t/d\tT\tA\t10\t20\t1\n", &parsed_old);
+    check_int("old format loads", parsed_old.count, 1);
+    check_int("missing synced reads as 0", (long)parsed_old.items[0].synced_pos, 0);
+
+    abs_manifest parsed_new;
+    abs_manifest_parse("li_5\t/d\tT\tA\t10\t20\t1\t345\n", &parsed_new);
+    check_int("synced column read", (long)parsed_new.items[0].synced_pos, 345);
+
     /* The lookup sync depends on: firmware path -> ABS item. */
     const abs_download *hit = abs_manifest_find_by_path(&out,
         "/mnt/ext1/Audio Books/Frank Herbert - Dune/Dune.m4b");
@@ -662,6 +673,103 @@ static void test_manifest_dir(void)
               (long)abs_manifest_dir_for("Frank Herbert", "Dune", small, sizeof small), 0);
 }
 
+static void test_read_position(void)
+{
+    char path[512];
+    double loc;
+
+    printf("read_position parsing:\n");
+
+    /* The exact string observed on the device. */
+    check_int("parses", abs_parse_read_position(
+        "/mnt/ext1/Audio Books/Peter Block - Community, Third Edition/"
+        "Community Third Edition.m4b:#loc(87)", path, sizeof path, &loc), 1);
+    check_str("path", path,
+        "/mnt/ext1/Audio Books/Peter Block - Community, Third Edition/"
+        "Community Third Edition.m4b");
+    check_int("loc", (long)loc, 87);
+
+    /* PocketBook uses ':#zip(...)' too, so a path may legitimately contain
+     * a colon before the one we want. */
+    check_int("colon in path", abs_parse_read_position(
+        "/mnt/ext1/x/book.zip:#zip(a.mp3):#loc(12)", path, sizeof path, &loc), 1);
+    check_str("keeps inner colon", path, "/mnt/ext1/x/book.zip:#zip(a.mp3)");
+    check_int("loc after", (long)loc, 12);
+
+    check_int("no marker",
+              abs_parse_read_position("/some/path.m4b", path, sizeof path, &loc), 0);
+    check_int("unterminated",
+              abs_parse_read_position("/p.m4b:#loc(12", path, sizeof path, &loc), 0);
+    check_int("empty number",
+              abs_parse_read_position("/p.m4b:#loc()", path, sizeof path, &loc), 0);
+    check_int("null", abs_parse_read_position(NULL, path, sizeof path, &loc), 0);
+
+    char small[8];
+    check_int("path too long for buffer",
+              abs_parse_read_position("/a/very/long/path.m4b:#loc(1)", small,
+                                      sizeof small, &loc), 0);
+}
+
+static void test_position_units(void)
+{
+    printf("position units:\n");
+
+    /* Both hardware observations: plainly seconds. */
+    check_int("87s of a 24057s book", (long)abs_sync_position_seconds(87, 24057), 87);
+    check_int("39s of a 19222s book", (long)abs_sync_position_seconds(39, 19222), 39);
+
+    /* If it cannot be seconds but works as ms, it is ms. This is the guard
+     * against silently scaling every position by 1000. */
+    check_int("ms fallback", (long)abs_sync_position_seconds(90000, 3600), 90);
+
+    /* Neither reading fits: clamp rather than send nonsense. */
+    check_int("clamped", (long)abs_sync_position_seconds(99999999, 3600), 3600);
+
+    check_int("zero", (long)abs_sync_position_seconds(0, 3600), 0);
+    check_int("unknown duration passes through",
+              (long)abs_sync_position_seconds(42, 0), 42);
+}
+
+static void test_progress_body(void)
+{
+    char buf[256];
+
+    printf("progress body:\n");
+
+    abs_build_progress_body(87, 24057, buf, sizeof buf);
+    check_int("has currentTime", strstr(buf, "\"currentTime\":87") != NULL, 1);
+    check_int("not finished early", strstr(buf, "\"isFinished\":false") != NULL, 1);
+
+    /* Only near the very end, since finishing a book is destructive on the
+     * server (it leaves Continue Listening). */
+    abs_build_progress_body(24050, 24057, buf, sizeof buf);
+    check_int("finished at the end", strstr(buf, "\"isFinished\":true") != NULL, 1);
+
+    abs_build_progress_body(12000, 24000, buf, sizeof buf);
+    check_int("half way not finished", strstr(buf, "\"isFinished\":false") != NULL, 1);
+    check_int("progress 0.5", strstr(buf, "\"progress\":0.5") != NULL, 1);
+
+    /* Position beyond the end must be clamped, not sent as-is. */
+    abs_build_progress_body(99999, 100, buf, sizeof buf);
+    check_int("clamped to duration", strstr(buf, "\"currentTime\":100") != NULL, 1);
+
+    char tiny[8];
+    check_int("tiny buffer", (long)abs_build_progress_body(1, 2, tiny, sizeof tiny), 0);
+}
+
+static void test_should_push(void)
+{
+    printf("push threshold:\n");
+
+    check_int("moved a minute", abs_sync_should_push(120, 60), 1);
+    check_int("unchanged", abs_sync_should_push(60, 60), 0);
+    check_int("jitter ignored", abs_sync_should_push(62, 60), 0);
+    check_int("never pushed before", abs_sync_should_push(87, 0), 1);
+    check_int("zero position", abs_sync_should_push(0, 0), 0);
+    /* Going backwards is still a real change worth sending. */
+    check_int("rewound", abs_sync_should_push(60, 600), 1);
+}
+
 int main(void)
 {
     test_sanitize();
@@ -686,6 +794,10 @@ int main(void)
     test_download_url();
     test_manifest();
     test_manifest_dir();
+    test_read_position();
+    test_position_units();
+    test_progress_body();
+    test_should_push();
 
     if (failures) {
         printf("\n%d failure(s)\n", failures);

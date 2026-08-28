@@ -49,6 +49,11 @@ int abs_http_post_json(const abs_config *cfg, const char *url, const char *body,
                        const char *bearer, abs_http_response *res,
                        size_t max_bytes);
 
+/* As abs_http_post_json, but PATCH -- what the progress endpoint expects. */
+int abs_http_patch_json(const abs_config *cfg, const char *url, const char *body,
+                        const char *bearer, abs_http_response *res,
+                        size_t max_bytes);
+
 void abs_http_free(abs_http_response *res);
 
 /* Map an HTTP status to a message worth putting in front of a user. */

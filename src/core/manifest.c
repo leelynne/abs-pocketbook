@@ -8,7 +8,7 @@
 
 /*
  * One record per line, tab-separated:
- *   item_id \t dir \t title \t author \t duration \t size \t tracks
+ *   item_id \t dir \t title \t author \t duration \t size \t tracks \t synced
  *
  * Tab-separated rather than key=value because titles and authors are free
  * text and routinely contain '=' and ':'; tabs they never contain.
@@ -58,8 +58,12 @@ void abs_manifest_parse(const char *text, abs_manifest *m)
             e.duration = atof(num);
             q = take_field(q, line_end, num, sizeof num);
             e.size = atoll(num);
-            take_field(q, line_end, num, sizeof num);
+            q = take_field(q, line_end, num, sizeof num);
             e.track_count = atoi(num);
+            /* Added after the first release; absent in older files, where
+             * take_field yields "" and this reads as 0. */
+            take_field(q, line_end, num, sizeof num);
+            e.synced_pos = atof(num);
 
             /* A record with no id or directory is unusable for sync. */
             if (e.item_id[0] != '\0' && e.dir[0] != '\0') {
@@ -76,16 +80,17 @@ size_t abs_manifest_serialize(const abs_manifest *m, char *out, size_t out_size)
 {
     size_t used = 0;
 
-    int n = snprintf(out, out_size, "# item\tdir\ttitle\tauthor\tduration\tsize\ttracks\n");
+    int n = snprintf(out, out_size,
+                     "# item\tdir\ttitle\tauthor\tduration\tsize\ttracks\tsynced\n");
     if (n < 0 || (size_t)n >= out_size) return 0;
     used = (size_t)n;
 
     for (int i = 0; i < m->count; i++) {
         const abs_download *e = &m->items[i];
         n = snprintf(out + used, out_size - used,
-                     "%s\t%s\t%s\t%s\t%.0f\t%lld\t%d\n",
+                     "%s\t%s\t%s\t%s\t%.0f\t%lld\t%d\t%.0f\n",
                      e->item_id, e->dir, e->title, e->author,
-                     e->duration, e->size, e->track_count);
+                     e->duration, e->size, e->track_count, e->synced_pos);
         if (n < 0 || (size_t)n >= out_size - used) return 0;
         used += (size_t)n;
     }
