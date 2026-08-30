@@ -6,8 +6,10 @@ build/
 *.o
 *.app
 
-# ...except the published binary, so the app can be installed without a build
-!release/ABSClient.app
+# Built by scripts/release.sh and attached to a GitHub Release, not committed:
+# a binary in the tree silently drifts from its source, and one shipped here
+# once carried a fixed-in-source security bug for exactly that reason.
+release/
 
 # Snapshots of device firmware config taken before edits
 device-backup/

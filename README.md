@@ -44,10 +44,13 @@ expectation, not a claim. Reports welcome.
 
 ## Installing
 
-1. Download **[`release/ABSClient.app`](release/ABSClient.app)**.
+1. Download **`ABSClient.app`** from the
+   [latest release](../../releases/latest).
 2. Connect the reader over USB and choose the storage/connect option on its screen.
 3. Copy `ABSClient.app` into the `applications` folder on the device.
 4. Eject the device. The app appears under **Applications**.
+
+Or build it yourself — see [Building](#building).
 
 Then open it and sign in: enter your server address (`https://abs.example.com`), an admin
 username and password, and optionally the account the key should belong to. Creating API
@@ -93,8 +96,13 @@ under emulation inside a container — nothing is installed on the host.
 ./scripts/setup-sdk.sh    # one-time: fetch and unpack the SDK into sdk/ (~1.3 GB)
 ./scripts/build.sh        # cross-compile -> build/ABSClient.app
 ./scripts/deploy.sh       # copy to a PocketBook mounted over USB
-./scripts/build.sh release # stripped binary into release/
+./scripts/release.sh      # verified, stripped binary -> release/ABSClient.app
 ```
+
+`release.sh` refuses to produce a binary from a dirty tree or failing tests, and checks
+the result before handing it over: correct ARM ABI, expected libraries, SQLite linked
+statically, no credentials in URLs, and no embedded key material. The output name never
+changes, so a release replaces the file rather than adding another one.
 
 Logic in `src/core/` has no InkView dependency and builds natively, so it can be tested
 without the SDK, a container, or the device:
@@ -109,6 +117,7 @@ make test
 src/core/     pure C -- API shapes, parsing, progress math, paths. Host-testable.
 src/ui/       InkView-dependent -- event loop, screens, drawing, networking, downloads.
 src/vendor/   cJSON, stb_image
+release/      build output (not committed)
 spike/        throwaway hardware probes
 tests/        host-side tests for src/core
 docs/PLAN.md  architecture, the ABS API surface, and what the device actually does

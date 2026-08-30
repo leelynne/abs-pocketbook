@@ -116,6 +116,21 @@ plain JWTs accepted as `Authorization: Bearer` *or* `?token=`, `/login` sits abo
 `/api` router, key creation is admin-only, and `isActive: true` must be sent explicitly or
 the server mints a key that authenticates nothing.
 
+## Releasing
+
+`scripts/release.sh` is the only supported way to produce a distributable binary. It
+refuses a dirty tree or failing tests, then gates the output on the ARM ABI, the expected
+shared libraries, SQLite being statically linked, no `token=` in any URL format string,
+and no embedded JWT. The last two exist because a binary carrying a credential-leaking bug
+was once committed and installed after the source was already fixed.
+
+The binary is **not** in the repo -- it belongs on a GitHub Release. A committed binary
+drifts from its source silently, which is exactly how that happened.
+
+Note for anyone editing that script: do not write `strings "$file" | grep -q ...` under
+`set -o pipefail`. `grep -q` exits on first match, `strings` takes SIGPIPE, and the
+pipeline reports failure precisely when the match succeeds.
+
 ## Verify your edits landed
 
 Several bugs in this repo's history were **silent patch failures** — a scripted edit whose
