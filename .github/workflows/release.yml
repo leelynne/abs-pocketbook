@@ -104,6 +104,9 @@ jobs:
           TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           set -eu
+
+          # GitHub refuses .app as a release asset extension, so ship a zip.
+          cd release && zip -q "ABSClient-$TAG.zip" ABSClient.app && cd ..
           sha=$(sha256sum release/ABSClient.app | cut -d' ' -f1)
 
           cat > notes.md <<NOTES
@@ -111,9 +114,9 @@ jobs:
 
           ## Install
 
-          1. Download \`ABSClient.app\` below.
+          1. Download the zip below and unpack it to get \`ABSClient.app\`.
           2. Connect the reader over USB and choose the storage option on its screen.
-          3. Copy it into the \`applications\` folder on the device.
+          3. Copy \`ABSClient.app\` into the \`applications\` folder on the device.
           4. Eject. The app appears under **Applications**.
 
           Then open it and sign in with your server address and an admin username
@@ -122,12 +125,18 @@ jobs:
           Tested on the PocketBook Verse Pro (PB634), firmware 6.10.
 
           \`\`\`
-          sha256  $sha
+          sha256  $sha   (ABSClient.app, unzipped)
           \`\`\`
           NOTES
 
-          gh release create "$TAG" \
-            --title "$TAG" \
-            --notes-file notes.md \
-            --verify-tag \
-            release/ABSClient.app
+          # Idempotent: re-running for an existing tag replaces the asset
+          # rather than failing.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "release/ABSClient-$TAG.zip" --clobber
+          else
+            gh release create "$TAG" \
+              --title "$TAG" \
+              --notes-file notes.md \
+              --verify-tag \
+              "release/ABSClient-$TAG.zip"
+          fi

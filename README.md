@@ -44,8 +44,8 @@ expectation, not a claim. Reports welcome.
 
 ## Installing
 
-1. Download **`ABSClient.app`** from the
-   [latest release](../../releases/latest).
+1. Download the zip from the [latest release](../../releases/latest) and unpack it
+   to get **`ABSClient.app`**.
 2. Connect the reader over USB and choose the storage/connect option on its screen.
 3. Copy `ABSClient.app` into the `applications` folder on the device.
 4. Eject the device. The app appears under **Applications**.
