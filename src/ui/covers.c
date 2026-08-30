@@ -259,6 +259,62 @@ void abs_covers_free_memory(void)
 
 /* ------------------------------------------------------------------ main -- */
 
+int abs_cover_save_beside(const abs_config *cfg, const char *item_id,
+                          const char *dir)
+{
+    char src_path[512];
+    unsigned char *bytes = NULL;
+    size_t len = 0;
+
+    if (item_id == NULL || dir == NULL || dir[0] == '\0') return 0;
+
+    /* Prefer the copy already on disk: viewing the book warms it, so this is
+     * usually free. */
+    cache_path(item_id, src_path, sizeof src_path);
+    bytes = read_file(src_path, &len);
+
+    if (bytes == NULL) {
+        char url[ABS_MAX_URL + ABS_MAX_TOKEN + 96];
+        if (abs_url_item_cover(cfg, item_id, url, sizeof url) == 0) return 0;
+
+        abs_http_response res;
+        if (!abs_http_get_auth(cfg, url, NULL, &res, COVER_MAX_BYTES)) return 0;
+        if (res.status != 200 || res.len == 0) { abs_http_free(&res); return 0; }
+
+        len = res.len;
+        bytes = malloc(len);
+        if (bytes != NULL) memcpy(bytes, res.data, len);
+        abs_http_free(&res);
+        if (bytes == NULL) return 0;
+    }
+
+    /* Name it for what it actually is rather than assuming JPEG. */
+    const char *ext = "jpg";
+    if (len > 8 && bytes[0] == 0x89 && bytes[1] == 'P' && bytes[2] == 'N' &&
+        bytes[3] == 'G') {
+        ext = "png";
+    }
+
+    char dest[640];
+    snprintf(dest, sizeof dest, "%s/cover.%s", dir, ext);
+
+    FILE *f = fopen(dest, "wb");
+    if (f == NULL) { free(bytes); return 0; }
+
+    size_t written = fwrite(bytes, 1, len, f);
+    fclose(f);
+    free(bytes);
+
+    if (written != len) {
+        unlink(dest);
+        abs_log("cover: short write to %s", dest);
+        return 0;
+    }
+
+    abs_log("cover written: %s (%lu bytes)", dest, (unsigned long)len);
+    return 1;
+}
+
 ibitmap *abs_cover_get(const abs_config *cfg, const char *item_id,
                        int w, int h, int allow_fetch)
 {

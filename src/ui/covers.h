@@ -25,4 +25,18 @@ ibitmap *abs_cover_get(const abs_config *cfg, const char *item_id,
 /* Drop the in-memory thumbnails (the disk cache is untouched). */
 void abs_covers_free_memory(void);
 
+/*
+ * Write the item's cover into `dir` as cover.jpg (or cover.png, matching the
+ * actual bytes), next to the downloaded audio.
+ *
+ * The stock audiobook player does not appear to show art -- there is no
+ * Audio Books entry in the firmware's thumbnail cache -- but this costs
+ * nothing when the cover is already cached, follows a convention other tools
+ * understand, and makes a folder identifiable over USB.
+ *
+ * Returns 1 if a file was written.
+ */
+int abs_cover_save_beside(const abs_config *cfg, const char *item_id,
+                          const char *dir);
+
 #endif /* ABS_COVERS_H */

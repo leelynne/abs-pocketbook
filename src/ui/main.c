@@ -13,6 +13,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <dirent.h>
 #include <string.h>
 
 #include "core/abs_api.h"
@@ -75,7 +76,7 @@ enum { ACT_NONE = 0, ACT_EDIT_SERVER, ACT_EDIT_ADMIN_USER, ACT_EDIT_ADMIN_PASS,
        ACT_EDIT_TARGET_USER, ACT_SIGN_IN, ACT_OPEN_SETUP, ACT_SHOW_LIBRARIES,
        ACT_PREV_PAGE, ACT_NEXT_PAGE, ACT_BACK_TO_ITEMS, ACT_GO_BACK,
        ACT_SCROLL_UP, ACT_SCROLL_DOWN,
-       ACT_DOWNLOAD, ACT_CANCEL_DL, ACT_PLAY, ACT_DELETE,
+       ACT_DOWNLOAD, ACT_CANCEL_DL, ACT_PLAY,
        ACT_SEARCH, ACT_CLEAR_SEARCH,
        ACT_PICK_LIBRARY_BASE = 1000,     /* + index into `libraries` */
        ACT_PICK_ITEM_BASE    = 2000 };   /* + index into `items` */
@@ -220,6 +221,25 @@ static void save_state(void)
     fwrite(buf, 1, n, f);
     fclose(f);
     abs_log("state saved: screen=%d lib=%s page=%d", st.screen, st.library_id, st.page);
+}
+
+/* Does this download still exist on disk? The native player can delete it. */
+static int download_present(const char *dir)
+{
+    if (dir == NULL || dir[0] == '\0') return 0;
+
+    DIR *d = opendir(dir);
+    if (d == NULL) return 0;
+
+    int found = 0;
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL) {
+        if (de->d_name[0] == '.') continue;
+        found = 1;
+        break;
+    }
+    closedir(d);
+    return found;
 }
 
 static void manifest_load(void)
@@ -691,11 +711,9 @@ static void draw_detail_screen(void)
      * scrolling. */
     int act_y = screen_h - row_h * 2;
     const abs_download *have = abs_manifest_find(&manifest, detail.id);
-    int half = (screen_w - margin * 2 - margin / 2) / 2;
 
     if (have != NULL) {
-        draw_button_at(margin, act_y, half, "Play", ACT_PLAY);
-        draw_button_at(margin + half + margin / 2, act_y, half, "Delete", ACT_DELETE);
+        draw_button_at(margin, act_y, screen_w - margin * 2, "Play", ACT_PLAY);
     } else if (detail.track_count > 0) {
         char label[64], sz[32];
         abs_format_size(detail.tracks_total_size, sz, sizeof sz);
@@ -1077,6 +1095,18 @@ static void fetch_detail(const char *item_id)
 
     if (!parsed) { fail("Could not read that book's details."); return; }
 
+    /*
+     * Deleting a book is the native player's job, so our record can go stale.
+     * Drop it if the files are gone; the screen then offers Download again
+     * rather than a Play button that opens nothing.
+     */
+    const abs_download *known = abs_manifest_find(&manifest, detail.id);
+    if (known != NULL && !download_present(known->dir)) {
+        abs_log("download vanished, forgetting %s", known->item_id);
+        abs_manifest_remove(&manifest, detail.id);
+        manifest_save();
+    }
+
     detail_scroll = 0;
     server_position = -1;
 
@@ -1363,6 +1393,10 @@ static void dl_pump_cb(void)
     repaint_counter = 0;
 
     if (st->state == DL_DONE && dl_entry.item_id[0] != '\0') {
+        /* Drop the cover in beside the audio. Usually free -- the disk cache
+         * is already warm from viewing the book. */
+        abs_cover_save_beside(&config, dl_entry.item_id, dl_entry.dir);
+
         dl_entry.size = st->done_bytes;
         abs_manifest_put(&manifest, &dl_entry);
         manifest_save();
@@ -1711,18 +1745,6 @@ static void handle_action(int action)
             abs_log("OpenBook failed, falling back to PlayFile");
             PlayFile(path);
         }
-        break;
-    }
-
-    case ACT_DELETE: {
-        const abs_download *have = abs_manifest_find(&manifest, detail.id);
-        if (have == NULL) break;
-        abs_log("forgetting download %s", have->item_id);
-        /* Only the record is dropped here; the audio stays on the device for
-         * the stock player, and the user can delete it from the library. */
-        abs_manifest_remove(&manifest, detail.id);
-        manifest_save();
-        draw_current_screen();
         break;
     }
 

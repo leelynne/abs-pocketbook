@@ -38,7 +38,7 @@ LDFLAGS = -L$(SYSROOT)/usr/local/lib \
           $(SYSROOT)/usr/lib/libsqlite3.a \
           -lpthread -lm -ldl
 
-.PHONY: all clean test spike FORCE
+.PHONY: all clean test spike release FORCE
 
 all: $(BUILD_DIR)/$(APP_NAME)
 
@@ -77,6 +77,15 @@ test:
 	$(HOST_CC) -Wall -Wextra -std=gnu99 -Isrc -DABS_BUILD_ID=\"test\" \
 		tests/test_core.c $(CORE_SRC) $(VENDOR_SRC) -o $(BUILD_DIR)/test_core
 	@$(BUILD_DIR)/test_core
+
+# The stripped binary checked into release/, so the app can be installed
+# without setting up the SDK.
+release: $(BUILD_DIR)/$(APP_NAME)
+	@mkdir -p release
+	cp $(BUILD_DIR)/$(APP_NAME) release/$(APP_NAME)
+	$(SDK_PATH)/bin/arm-obreey-linux-gnueabi-strip release/$(APP_NAME)
+	@echo "--- release/$(APP_NAME) ---"
+	@file release/$(APP_NAME)
 
 clean:
 	rm -rf $(BUILD_DIR)
