@@ -1,8 +1,7 @@
 # Audiobookshelf client for PocketBook
 
 A native [Audiobookshelf](https://www.audiobookshelf.org/) client for PocketBook
-e-readers, built with the InkView SDK. Developed and tested on the **PocketBook
-Verse Pro (PB634)**, firmware 6.10.
+e-readers, built with the InkView SDK.
 
 The Verse Pro already plays audiobooks perfectly well. What it can't do is talk to your
 server. This app is that missing half: it browses your Audiobookshelf library, downloads
@@ -31,6 +30,17 @@ app could — so books are downloaded where the firmware indexes them, and opene
   device.
 - **Picks up where you left off.** The firmware closes apps when you press Home; the app
   saves your place and returns to it.
+
+## Tested devices
+
+| Device | Model | Firmware | Notes |
+|---|---|---|---|
+| PocketBook Verse Pro | PB634 | 6.10 (`U634.6.10.3425`) | Audio over Bluetooth or USB-C; no speaker |
+
+Nothing else has been tried. The UI scales off `ScreenWidth()`/`ScreenHeight()` rather
+than assuming the Verse Pro's 1072x1448, and the binary is built against the B288 SDK, so
+other 6.x PocketBooks with audio have a fair chance of working — but that is an
+expectation, not a claim. Reports welcome.
 
 ## Installing
 
@@ -72,8 +82,7 @@ applications/ABSClient/LOGTRIGGER.TXT   ->   writes abs_client.log
 - An Audiobookshelf v2.x server.
 - An **admin** account, if you want the app to create its own API key. Otherwise supply a
   key through `scripts/configure-device.sh`.
-- A PocketBook with audio. Tested only on the Verse Pro; the UI scales off screen size
-  rather than assuming its dimensions, but nothing else has been verified.
+- A PocketBook with audio — see [Tested devices](#tested-devices).
 
 ## Building
 
@@ -117,6 +126,14 @@ AGENTS.md     orientation for anyone (or anything) working on this next
 - **No cover art in the stock audiobook list.** The firmware does not appear to render it
   for audiobooks; a `cover.jpg` is written alongside the audio regardless.
 - Podcast libraries are filtered out.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+Vendored third-party code keeps its own terms: [cJSON](https://github.com/DaveGamble/cJSON)
+(MIT) and [stb_image](https://github.com/nothings/stb) (public domain / MIT), both under
+`src/vendor/`.
 
 ## References
 
