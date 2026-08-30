@@ -1,7 +1,7 @@
 #ifndef ABS_VERSION_H
 #define ABS_VERSION_H
 
-#define ABS_CLIENT_VERSION "0.2.0"
+#define ABS_CLIENT_VERSION "1.0.0"
 
 /*
  * Human-readable one-liner for the footer, e.g. "ABS Client 0.2.0 (build 1421)".
