@@ -24,9 +24,13 @@ make test                  # host-side tests, no SDK or device needed
 The toolchain is x86_64 Linux and runs under emulation on Apple Silicon. `sdk/` is
 gitignored and reproducible from the script.
 
-**Every build stamps an id into the binary and shows it on screen** (`build 202942`, in
-the book list footer). This exists because two deploys in a row silently failed to reach
-the device and there was no way to tell which build was running. Check it after deploying.
+**Every build stamps the commit into the binary and shows it on screen** (`build 016647f`,
+in the book list footer). This exists because two deploys in a row silently failed to
+reach the device and there was no way to tell which build was running. A trailing `+`
+means the tree was dirty, so the stamp does not fully describe the binary. Because it is
+the commit rather than a timestamp, `scripts/release.sh` and the release workflow can
+*verify* a binary carries the source it was built from, rather than merely printing an
+identifier.
 
 ## Platform rules — each of these was learned by breaking it
 
@@ -125,7 +129,8 @@ and no embedded JWT. The last two exist because a binary carrying a credential-l
 was once committed and installed after the source was already fixed.
 
 The binary is **not** in the repo -- it belongs on a GitHub Release. A committed binary
-drifts from its source silently, which is exactly how that happened.
+drifts from its source silently, which is exactly how that happened. Tagging `v*` runs
+`.github/workflows/release.yml`, which applies the same gates and publishes the binary.
 
 Note for anyone editing that script: do not write `strings "$file" | grep -q ...` under
 `set -o pipefail`. `grep -q` exits on first match, `strings` takes SIGPIPE, and the

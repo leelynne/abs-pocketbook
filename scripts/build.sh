@@ -17,6 +17,12 @@ if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
     docker build --platform linux/amd64 -t "$IMAGE" "$REPO_ROOT"
 fi
 
+# The build stamp has to be computed out here: the container has no git, so
+# working it out inside would silently fall back to "dev" -- which is exactly
+# what it did until the release check started verifying it.
+BUILD_ID="$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo dev)"
+git -C "$REPO_ROOT" diff --quiet HEAD 2>/dev/null || BUILD_ID="$BUILD_ID+"
+
 # The SDK bundles its own host libraries (libmpfr, libgmp, libmpc ...) that
 # cc1 needs at runtime; the container's linker won't find them otherwise.
 docker run --rm --platform linux/amd64 \
@@ -24,4 +30,4 @@ docker run --rm --platform linux/amd64 \
     -v "$SDK:/SDK:ro" \
     -w /work \
     -e LD_LIBRARY_PATH=/SDK/usr/lib \
-    "$IMAGE" make "$@"
+    "$IMAGE" make BUILD_ID="$BUILD_ID" "$@"

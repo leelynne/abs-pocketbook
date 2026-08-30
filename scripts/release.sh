@@ -33,6 +33,9 @@ if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
 fi
 
 COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+# A dirty tree stamps a trailing '+' -- see BUILD_ID in the Makefile.
+EXPECTED_STAMP="$COMMIT"
+git diff --quiet HEAD 2>/dev/null || EXPECTED_STAMP="$COMMIT+"
 
 # --- 2. never ship something the tests reject ------------------------------
 echo "==> Running host tests"
@@ -91,14 +94,17 @@ fi
 echo "   ok  no embedded key material"
 
 # --- 5. report --------------------------------------------------------------
-BUILD_ID="$(grep -E '^[0-9]{6}$' <<<"$SYMS" | head -1 || echo "?")"
+# The stamp is now the commit, so this is a real check rather than a readout:
+# the binary must carry the source it was built from.
+grep -qx "$EXPECTED_STAMP" <<<"$SYMS" \
+    || fail "binary is not stamped with $EXPECTED_STAMP"
+echo "   ok  stamped with $EXPECTED_STAMP"
 SIZE="$(ls -lh "$OUT" | awk '{print $5}')"
 SHA="$(shasum -a 256 "$OUT" | cut -c1-16)"
 
 echo
 echo "==> $OUT"
-echo "    commit    $COMMIT"
-echo "    build id  $BUILD_ID   (shown in the app's footer)"
+echo "    commit    $EXPECTED_STAMP   (shown in the app's footer)"
 echo "    size      $SIZE"
 echo "    sha256    $SHA..."
 echo

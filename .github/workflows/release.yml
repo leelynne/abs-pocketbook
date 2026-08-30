@@ -1,0 +1,133 @@
+# Builds a verified binary and publishes it as a GitHub Release.
+#
+# Tag-driven, because a release should name a commit. This is also what makes
+# the README's "download the latest release" link real -- the binary is
+# deliberately not committed to the tree.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (must already exist)"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    container:
+      image: ghcr.io/leelynne/pocketbook-sdk:6.8-b288
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Host tests
+        run: make test
+
+      - name: Build and strip
+        # BUILD_ID comes from the workflow, not from git: the container has no
+        # git, and a stamp that silently says "dev" defeats the check below.
+        run: |
+          BUILD_ID=$(echo "${{ github.sha }}" | cut -c1-7)
+          echo "BUILD_ID=$BUILD_ID" >> "$GITHUB_ENV"
+          make SDK_ROOT=/SDK BUILD_ID="$BUILD_ID"
+          make release SDK_ROOT=/SDK BUILD_ID="$BUILD_ID"
+
+      - name: Verify
+        shell: bash
+        # The same gates scripts/release.sh applies locally. A release is the
+        # one artifact people install without reading the source.
+        run: |
+          set -eux
+          READELF=/SDK/usr/bin/arm-obreey-linux-gnueabi-readelf
+          OUT=release/ABSClient.app
+
+          $READELF -h "$OUT" | grep -q "Machine:.*ARM"
+          $READELF -h "$OUT" | grep -q "soft-float ABI"
+
+          NEEDED=$($READELF -d "$OUT" | grep NEEDED)
+          for lib in libinkview.so libcurl.so libfreetype.so libc.so; do
+            echo "$NEEDED" | grep -q "$lib"
+          done
+          if echo "$NEEDED" | grep -q libsqlite3; then
+            echo "sqlite must be linked statically"; exit 1
+          fi
+
+          SYMS=$(strings "$OUT")
+          if grep -qE "(cover|download)\?token=" <<<"$SYMS"; then
+            echo "token-in-URL format string present"; exit 1
+          fi
+          grep -q "REDACTED" <<<"$SYMS" || { echo "log redaction missing"; exit 1; }
+          if grep -qE "eyJ[A-Za-z0-9_-]{16,}" <<<"$SYMS"; then
+            echo "embedded JWT"; exit 1
+          fi
+
+          # The binary must carry the commit it was built from.
+          grep -qx "$BUILD_ID" <<<"$SYMS" \
+            || { echo "binary is not stamped with $BUILD_ID"; exit 1; }
+          echo "verified, stamped $BUILD_ID"
+
+      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: release-binary
+          path: release/ABSClient.app
+
+  publish:
+    name: Publish
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          name: release-binary
+          path: release
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -eu
+          sha=$(sha256sum release/ABSClient.app | cut -d' ' -f1)
+
+          cat > notes.md <<NOTES
+          Native Audiobookshelf client for PocketBook e-readers.
+
+          ## Install
+
+          1. Download \`ABSClient.app\` below.
+          2. Connect the reader over USB and choose the storage option on its screen.
+          3. Copy it into the \`applications\` folder on the device.
+          4. Eject. The app appears under **Applications**.
+
+          Then open it and sign in with your server address and an admin username
+          and password. The device mints its own API key; your password is not stored.
+
+          Tested on the PocketBook Verse Pro (PB634), firmware 6.10.
+
+          \`\`\`
+          sha256  $sha
+          \`\`\`
+          NOTES
+
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --notes-file notes.md \
+            --verify-tag \
+            release/ABSClient.app

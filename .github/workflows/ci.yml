@@ -97,9 +97,12 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Build app and spike
+        # BUILD_ID is passed in: the container has no git, so letting the
+        # Makefile work it out would stamp "dev".
         run: |
-          make SDK_ROOT=/SDK
-          make spike SDK_ROOT=/SDK
+          BUILD_ID=$(echo "${{ github.sha }}" | cut -c1-7)
+          make SDK_ROOT=/SDK BUILD_ID="$BUILD_ID"
+          make spike SDK_ROOT=/SDK BUILD_ID="$BUILD_ID"
 
       - name: Verify the binary
         # These checks only fail on the device otherwise, where the symptom is

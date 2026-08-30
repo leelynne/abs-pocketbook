@@ -20,7 +20,11 @@ OBJ      = $(patsubst src/%.c,$(BUILD_DIR)/%.o,$(SRC))
 # libinkview lives under /usr/local in the sysroot; everything else under /usr.
 # Stamped into the binary and shown on screen, so the device can tell you
 # which build it is actually running.
-BUILD_ID := $(shell date +%H%M%S)
+#
+# Derived from git rather than the clock: a timestamp cannot be checked
+# against anything, while a commit can. A trailing '+' means the tree had
+# uncommitted changes, so the stamp does not fully describe the binary.
+BUILD_ID := $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)$(shell     git diff --quiet HEAD 2>/dev/null || echo +)
 
 CFLAGS = -Wall -Wextra -O2 -std=gnu99 \
          -DABS_BUILD_ID=\"$(BUILD_ID)\" \
