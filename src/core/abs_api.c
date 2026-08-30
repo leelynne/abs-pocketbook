@@ -91,6 +91,8 @@ int abs_parse_libraries(const char *json, abs_library *out, int max)
         if (!cJSON_IsObject(entry)) continue;
 
         abs_library lib;
+        memset(&lib, 0, sizeof lib);
+
         copy_string_field(entry, "id", lib.id, sizeof lib.id);
         copy_string_field(entry, "name", lib.name, sizeof lib.name);
         copy_string_field(entry, "mediaType", lib.media_type, sizeof lib.media_type);
@@ -221,7 +223,11 @@ int abs_parse_users(const char *json, abs_user *out, int max)
         if (count >= max) break;
         if (!cJSON_IsObject(entry)) continue;
 
+        /* Zeroed before use: each field is written below, but copying the
+         * struct would otherwise also copy indeterminate padding. */
         abs_user u;
+        memset(&u, 0, sizeof u);
+
         copy_string_field(entry, "id", u.id, sizeof u.id);
         copy_string_field(entry, "username", u.username, sizeof u.username);
         copy_string_field(entry, "type", u.type, sizeof u.type);
