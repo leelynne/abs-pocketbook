@@ -19,7 +19,7 @@ jobs:
 
       # Carry the corpus between runs so coverage accumulates instead of
       # restarting from nothing every night.
-      - uses: actions/cache@6849a6489940f00c2f30c0fb92c6274307ccb58a # v4.1.2
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: corpus
           key: fuzz-corpus-${{ github.run_id }}
