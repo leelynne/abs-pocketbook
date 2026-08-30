@@ -1,0 +1,9 @@
+version: 2
+updates:
+  # Actions are pinned to commit SHAs; Dependabot keeps them current without
+  # giving up the pinning.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5

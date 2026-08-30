@@ -38,7 +38,7 @@ LDFLAGS = -L$(SYSROOT)/usr/local/lib \
           $(SYSROOT)/usr/lib/libsqlite3.a \
           -lpthread -lm -ldl
 
-.PHONY: all clean test spike release FORCE
+.PHONY: all clean test spike release fuzz FORCE
 
 all: $(BUILD_DIR)/$(APP_NAME)
 
@@ -86,6 +86,21 @@ release: $(BUILD_DIR)/$(APP_NAME)
 	$(SDK_PATH)/bin/arm-obreey-linux-gnueabi-strip release/$(APP_NAME)
 	@echo "--- release/$(APP_NAME) ---"
 	@file release/$(APP_NAME)
+
+# libFuzzer over the parsers in src/core -- the app's real attack surface,
+# since every byte they see comes from the server or from removable storage.
+# Needs a clang with libFuzzer; Apple's clang does not ship it, so this
+# normally runs in CI rather than locally.
+FUZZ_CC      ?= clang
+FUZZ_SECONDS ?= 30
+
+fuzz:
+	@mkdir -p $(BUILD_DIR)/fuzz corpus
+	$(FUZZ_CC) -g -O1 -std=gnu99 -Isrc -DABS_BUILD_ID=\"fuzz\" \
+		-fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all \
+		tests/fuzz_core.c $(CORE_SRC) $(VENDOR_SRC) -o $(BUILD_DIR)/fuzz/fuzz_core
+	$(BUILD_DIR)/fuzz/fuzz_core corpus \
+		-max_total_time=$(FUZZ_SECONDS) -max_len=8192 -print_final_stats=1
 
 clean:
 	rm -rf $(BUILD_DIR)

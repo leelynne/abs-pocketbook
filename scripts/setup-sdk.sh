@@ -24,10 +24,14 @@ if [ -d "SDK-B288" ]; then
 fi
 
 echo "==> Extracting"
+# 7-Zip exits non-zero because it refuses the ~86 relative symlinks that
+# escape the extraction root. Extraction succeeds regardless, so do not let
+# `set -e` abort here -- doing so skips the repair step below, leaving a
+# sysroot full of 0-byte stubs that fail at link time.
 if command -v 7zz >/dev/null 2>&1; then
-    7zz x -y "$SDK_ARCHIVE"
+    7zz x -y "$SDK_ARCHIVE" || echo "    (7z reported errors, expected)"
 elif command -v 7z >/dev/null 2>&1; then
-    7z x -y "$SDK_ARCHIVE"
+    7z x -y "$SDK_ARCHIVE" || echo "    (7z reported errors, expected)"
 else
     # No host 7-Zip: unpack inside a throwaway container instead of asking the
     # user to install one. Deliberately NOT --platform linux/amd64 -- unpacking
@@ -35,8 +39,12 @@ else
     echo "    (no host 7z found -- extracting via Docker)"
     docker run --rm \
         -v "$SDK_DIR:/sdk" -w /sdk debian:bookworm-slim \
-        sh -c "apt-get update -qq && apt-get install -y -qq p7zip-full >/dev/null && 7z x -y '$SDK_ARCHIVE'"
+        sh -c "apt-get update -qq && apt-get install -y -qq p7zip-full >/dev/null && \
+               { 7z x -y '$SDK_ARCHIVE' || echo '(7z reported errors, expected)'; }"
 fi
+
+[ -x "SDK-B288/usr/bin/arm-obreey-linux-gnueabi-gcc" ] \
+    || { echo "Extraction produced no toolchain." >&2; exit 1; }
 
 echo "==> Done. Toolchain at sdk/SDK-B288/usr/bin/arm-obreey-linux-gnueabi-gcc"
 

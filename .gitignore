@@ -18,3 +18,4 @@ device-backup/
 .DS_Store
 .#*
 *~
+corpus/

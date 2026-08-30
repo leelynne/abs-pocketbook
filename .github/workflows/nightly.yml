@@ -1,0 +1,65 @@
+# Longer-running checks that would make the PR loop tedious.
+name: Nightly
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: Fuzz parsers
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      # Carry the corpus between runs so coverage accumulates instead of
+      # restarting from nothing every night.
+      - uses: actions/cache@6849a6489940f00c2f30c0fb92c6274307ccb58a # v4.1.2
+        with:
+          path: corpus
+          key: fuzz-corpus-${{ github.run_id }}
+          restore-keys: fuzz-corpus-
+
+      - run: make fuzz FUZZ_SECONDS=600
+
+      - name: Upload crashers
+        if: failure()
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: fuzz-crashers
+          path: |
+            crash-*
+            leak-*
+            timeout-*
+          if-no-files-found: ignore
+
+  vendored:
+    name: Vendored dependency check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Compare cJSON and stb_image against upstream
+        # Dependabot cannot see vendored source, and vendored code is exactly
+        # the kind that silently ages.
+        run: |
+          set -u
+          ours=$(grep -oE 'CJSON_VERSION_(MAJOR|MINOR|PATCH) [0-9]+' src/vendor/cJSON.h \
+                 | awk '{printf "%s.", $2}' | sed 's/\.$//')
+          theirs=$(curl -fsSL https://raw.githubusercontent.com/DaveGamble/cJSON/master/cJSON.h \
+                   | grep -oE 'CJSON_VERSION_(MAJOR|MINOR|PATCH) [0-9]+' \
+                   | awk '{printf "%s.", $2}' | sed 's/\.$//')
+          echo "cJSON: vendored $ours, upstream $theirs"
+          [ "$ours" = "$theirs" ] || echo "::warning::cJSON is behind upstream ($ours < $theirs)"
+
+          if curl -fsSL https://raw.githubusercontent.com/nothings/stb/master/stb_image.h \
+               | diff -q - src/vendor/stb_image.h >/dev/null; then
+            echo "stb_image: up to date"
+          else
+            echo "::warning::stb_image differs from upstream"
+          fi
