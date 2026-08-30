@@ -2,9 +2,11 @@
 
 #include <stdarg.h>
 #include <stdio.h>
+#include <string.h>
 #include <time.h>
 #include <unistd.h>
 
+#include "core/abs_api.h"
 #include "core/paths.h"
 
 static int enabled = 0;
@@ -33,6 +35,13 @@ void abs_log_init(void)
 int abs_log_enabled(void)
 {
     return enabled;
+}
+
+const char *abs_log_redact_url(const char *url)
+{
+    static char buf[1024];
+    abs_redact_token(url, buf, sizeof buf);
+    return buf;
 }
 
 void abs_log(const char *fmt, ...)

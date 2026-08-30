@@ -12,6 +12,9 @@
  *
  * Tab-separated rather than key=value because titles and authors are free
  * text and routinely contain '=' and ':'; tabs they never contain.
+ *
+ * "never contain" is a statement about real books, not about what a server may
+ * send, so fields are flattened on the way out -- see write_field.
  */
 #define FIELD_SEP '\t'
 
@@ -69,6 +72,25 @@ void abs_manifest_parse(const char *text, abs_manifest *m)
     }
 }
 
+/*
+ * Copy a field with the record separators removed.
+ *
+ * Titles and authors come from the server. A tab or newline in one would inject
+ * extra fields, or an entire extra record, into this file.
+ */
+static void write_field(char *dst, size_t dst_size, const char *src)
+{
+    size_t w = 0;
+
+    if (dst == NULL || dst_size == 0) return;
+
+    for (const unsigned char *p = (const unsigned char *)src;
+         src != NULL && *p && w + 1 < dst_size; p++) {
+        dst[w++] = (*p == '\t' || *p == '\n' || *p == '\r') ? ' ' : (char)*p;
+    }
+    dst[w] = '\0';
+}
+
 size_t abs_manifest_serialize(const abs_manifest *m, char *out, size_t out_size)
 {
     size_t used = 0;
@@ -80,9 +102,17 @@ size_t abs_manifest_serialize(const abs_manifest *m, char *out, size_t out_size)
 
     for (int i = 0; i < m->count; i++) {
         const abs_download *e = &m->items[i];
+        char id[ABS_MAX_ID], dir[ABS_MAX_DIR];
+        char title[ABS_MAX_NAME], author[ABS_MAX_NAME];
+
+        write_field(id, sizeof id, e->item_id);
+        write_field(dir, sizeof dir, e->dir);
+        write_field(title, sizeof title, e->title);
+        write_field(author, sizeof author, e->author);
+
         n = snprintf(out + used, out_size - used,
                      "%s\t%s\t%s\t%s\t%.0f\t%lld\t%d\t%.0f\n",
-                     e->item_id, e->dir, e->title, e->author,
+                     id, dir, title, author,
                      e->duration, e->size, e->track_count, e->synced_pos);
         if (n < 0 || (size_t)n >= out_size - used) return 0;
         used += (size_t)n;

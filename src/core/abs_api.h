@@ -18,9 +18,11 @@
 size_t abs_url_libraries(const abs_config *cfg, char *out, size_t out_size);
 
 /*
- * Cover art. The token goes in the query string rather than a header because
- * ABS accepts either (its JWT strategy extracts from Authorization OR ?token=),
- * and image fetches are simpler to issue without custom headers.
+ * Cover art.
+ *
+ * Authenticated with an Authorization header, NOT ?token=. ABS accepts either,
+ * but a token in a URL ends up in our log, the server's access log, and any
+ * proxy between the two.
  */
 size_t abs_url_item_cover(const abs_config *cfg, const char *item_id,
                           char *out, size_t out_size);
@@ -107,9 +109,8 @@ size_t abs_url_item(const abs_config *cfg, const char *item_id,
 /*
  * Download URL for one audio file.
  *
- * The token goes in the query string: this URL is handed to a plain transfer
- * with no header plumbing, and ABS accepts ?token= as readily as a bearer
- * header (server/Auth.js builds its JWT strategy with both extractors).
+ * Authenticated with an Authorization header -- see abs_url_item_cover for why
+ * the token is kept out of the query string.
  */
 size_t abs_url_track_download(const abs_config *cfg, const char *item_id,
                               const char *ino, char *out, size_t out_size);
@@ -120,6 +121,15 @@ size_t abs_url_track_download(const abs_config *cfg, const char *item_id,
  * search for "Herbert & Sons" cannot truncate the URL at the ampersand.
  */
 size_t abs_url_encode(const char *in, char *out, size_t out_size);
+
+/*
+ * Copy `url` into `out` with any `token=` query value replaced by REDACTED.
+ *
+ * The log lives on removable storage and is the first thing attached to a bug
+ * report, so an API key must never reach it. Tokens are no longer placed in
+ * URLs at all; this is the backstop for when someone adds one again.
+ */
+void abs_redact_token(const char *url, char *out, size_t out_size);
 
 /* GET /api/libraries/:id/search?q=... */
 size_t abs_url_search(const abs_config *cfg, const char *library_id,

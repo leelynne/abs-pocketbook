@@ -186,8 +186,11 @@ static void test_urls(void)
     abs_url_libraries(&cfg, buf, sizeof buf);
     check_str("libraries", buf, "https://abs.example.com/api/libraries");
 
+    /* No token in the URL: it would reach our log, the server's access log,
+     * and any proxy in between. Authentication is a header. */
     abs_url_item_cover(&cfg, "li_abc", buf, sizeof buf);
-    check_str("cover", buf, "https://abs.example.com/api/items/li_abc/cover?token=tok123");
+    check_str("cover carries no token", buf,
+              "https://abs.example.com/api/items/li_abc/cover");
 
     /* Overflow must return 0 and not emit a half-formed URL. */
     char tiny[10];
@@ -521,6 +524,19 @@ static void test_state(void)
     abs_state_parse("garbage\n\n#comment\nlibrary_id=lib_9\n", &out);
     check_str("survives junk", out.library_id, "lib_9");
 
+    /* Library names are server-supplied; a newline would inject state keys. */
+    abs_state evil_state;
+    memset(&evil_state, 0, sizeof evil_state);
+    snprintf(evil_state.library_name, sizeof evil_state.library_name, "%s",
+             "Books\nitem_id=INJECTED");
+    snprintf(evil_state.library_id, sizeof evil_state.library_id, "%s", "lib_1");
+
+    char sbuf[1024];
+    abs_state_serialize(&evil_state, sbuf, sizeof sbuf);
+    abs_state reparsed_state;
+    abs_state_parse(sbuf, &reparsed_state);
+    check_str("no injected key", reparsed_state.item_id, "");
+
     char tiny[8];
     check_int("tiny buffer", (long)abs_state_serialize(&in, tiny, sizeof tiny), 0);
 }
@@ -596,8 +612,8 @@ static void test_download_url(void)
     snprintf(cfg.token, sizeof cfg.token, "%s", "tok");
 
     abs_url_track_download(&cfg, "li_1", "12345", buf, sizeof buf);
-    check_str("by inode, token in query", buf,
-              "https://abs.example.com/api/items/li_1/file/12345/download?token=tok");
+    check_str("by inode, no token in query", buf,
+              "https://abs.example.com/api/items/li_1/file/12345/download");
 }
 
 static void test_manifest(void)
@@ -684,6 +700,33 @@ static void test_manifest(void)
     abs_manifest_parse(tbuf, &parsed_odd);
     check_str("colon and equals in title", parsed_odd.items[0].title, "Title: A=B, Part 2");
     check_str("colon in author", parsed_odd.items[0].author, "Name: Surname");
+
+    /*
+     * Titles come from the server. A tab or newline in one would inject extra
+     * fields -- or an entire extra record whose dir matches every path the
+     * firmware reports, misattributing all listening progress.
+     */
+    abs_manifest evil;
+    memset(&evil, 0, sizeof evil);
+    abs_download bad;
+    memset(&bad, 0, sizeof bad);
+    snprintf(bad.item_id, sizeof bad.item_id, "%s", "li_ok");
+    snprintf(bad.dir, sizeof bad.dir, "%s", "/mnt/ext1/Audio Books/Real");
+    snprintf(bad.title, sizeof bad.title, "%s",
+             "Dune\nEVIL\t/mnt/ext1\tx\tx\t0\t0\t0\t0");
+    snprintf(bad.author, sizeof bad.author, "%s", "A\tB");
+    abs_manifest_put(&evil, &bad);
+
+    char ebuf[4096];
+    abs_manifest_serialize(&evil, ebuf, sizeof ebuf);
+
+    abs_manifest reparsed;
+    abs_manifest_parse(ebuf, &reparsed);
+    check_int("injection yields no extra record", reparsed.count, 1);
+    check_int("no injected item id",
+              abs_manifest_find(&reparsed, "EVIL") == NULL, 1);
+    check_int("no catch-all directory",
+              abs_manifest_find_by_path(&reparsed, "/mnt/ext1/anything/x.mp3") == NULL, 1);
 
     /* The documented full-manifest failure path. */
     abs_manifest full;
@@ -864,6 +907,34 @@ static void test_url_encode(void)
     check_int("null", (long)abs_url_encode(NULL, buf, sizeof buf), 0);
 }
 
+static void test_redact_token(void)
+{
+    char buf[256];
+
+    printf("token redaction:\n");
+
+    /* The exact shape that leaked a real API key into a device log. */
+    abs_redact_token("https://abs.example.com/api/items/li_1/cover?token=eyJhbG.secret.sig",
+                     buf, sizeof buf);
+    check_str("token stripped", buf,
+              "https://abs.example.com/api/items/li_1/cover?token=REDACTED");
+
+    /* Anything after the token must survive, so the URL still reads. */
+    abs_redact_token("https://x/api?token=abc123&limit=25", buf, sizeof buf);
+    check_str("keeps later params", buf, "https://x/api?token=REDACTED&limit=25");
+
+    abs_redact_token("https://x/api/libraries", buf, sizeof buf);
+    check_str("untouched when absent", buf, "https://x/api/libraries");
+
+    abs_redact_token(NULL, buf, sizeof buf);
+    check_str("null", buf, "(null)");
+
+    /* Truncation must not leave part of a token behind. */
+    char tiny[24];
+    abs_redact_token("https://x/a?token=supersecretvalue", tiny, sizeof tiny);
+    check_int("no secret in truncated output", strstr(tiny, "supersecret") == NULL, 1);
+}
+
 static void test_search(void)
 {
     abs_config cfg;
@@ -954,6 +1025,7 @@ int main(void)
     test_progress_body();
     test_should_push();
     test_url_encode();
+    test_redact_token();
     test_search();
     test_parse_progress();
 

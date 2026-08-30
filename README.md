@@ -115,6 +115,21 @@ docs/PLAN.md  architecture, the ABS API surface, and what the device actually do
 AGENTS.md     orientation for anyone (or anything) working on this next
 ```
 
+## Security notes
+
+- **The API key is stored in cleartext** in `abs_client.cfg`. PocketBook has no keystore
+  and FAT32 has no permissions, so anyone with the device or its USB storage can read it.
+  This is why the app uses a scoped, separately revocable API key rather than your
+  password — revoke it in Audiobookshelf if the device is lost.
+- **Tokens are never put in URLs**, only in an `Authorization` header, so they do not reach
+  this app's log, the server's access log, or any proxy between. The logger redacts
+  `token=` regardless.
+- **`insecure=1` disables certificate checking** for every request, including the sign-in
+  that carries your password. The app shows a warning banner whenever it is set. Only use
+  it for a self-signed certificate on a server you control.
+- Everything the server sends is treated as untrusted: filenames, ids, titles and image
+  data are sanitized before they reach a filesystem path or an on-disk record.
+
 ## Known limitations
 
 - **Home exits the app.** It is bound globally in firmware (`gkey.26.0=@KA_mmnu`) and

@@ -354,6 +354,24 @@ static void draw_header(const char *title)
     draw_header_ex(title, 0);
 }
 
+/*
+ * Warn when certificate verification is off.
+ *
+ * insecure=1 lives in a plain-text file on FAT32, so anyone with the device
+ * can set it, and it applies to every request including the sign-in that
+ * carries the admin password. It should never be silently in effect.
+ */
+static int draw_insecure_banner(int y)
+{
+    if (!config.insecure) return y;
+
+    SetFont(font_hint, BLACK);
+    DrawTextRect(margin, y, screen_w - margin * 2, row_h / 2,
+                 "! Certificate checking is off (insecure=1)",
+                 ALIGN_CENTER | DOTS);
+    return y + row_h / 2 + row_h / 8;
+}
+
 static void draw_footer(const char *hint)
 {
     SetFont(font_hint, DGRAY);
@@ -398,6 +416,8 @@ static void draw_setup_screen(void)
     draw_header("Audiobookshelf");
 
     int y = header_h + row_h / 3;
+
+    y = draw_insecure_banner(y);
 
     SetFont(font_hint, DGRAY);
     DrawTextRect(margin, y, screen_w - margin * 2, row_h,
@@ -451,6 +471,7 @@ static void draw_libraries_screen(void)
     draw_header("Libraries");
 
     int y = header_h + row_h / 3;
+    y = draw_insecure_banner(y);
 
     /*
      * Sync reports here, not on the setup screen: this is where the app lands
@@ -1006,6 +1027,10 @@ static void fetch_items(void)
     abs_http_free(&res);
 
     if (n < 0) { fail("Could not read the book list."); return; }
+
+    /* Server-supplied, and it feeds the page-count arithmetic. */
+    if (item_total < 0) item_total = 0;
+    if (item_total > 1000000) item_total = 1000000;
 
     item_count = n;
     abs_log("page %d: %d items of %d total", item_page, n, item_total);

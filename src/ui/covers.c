@@ -22,6 +22,7 @@
 #define COVER_DIR       ABS_APP_DIR "/covers"
 #define COVER_CACHE_CAP (20 * 1024 * 1024)   /* bytes on disk */
 #define COVER_MAX_BYTES (4 * 1024 * 1024)    /* refuse absurd images */
+#define COVER_MAX_DIM   8000                 /* and absurd dimensions */
 /*
  * Must exceed one screenful of rows, or a single page evicts its own covers
  * while drawing them. items_per_page is derived from screen height and capped
@@ -45,9 +46,18 @@ void abs_covers_init(void)
     iv_mkdir(COVER_DIR, 0777);
 }
 
+/*
+ * Cache filename for an item.
+ *
+ * The id comes from the server, so it is sanitized before touching the
+ * filesystem: an id of "../../../foo" would otherwise write outside the cache.
+ * Real ids are UUIDs and pass through unchanged.
+ */
 static void cache_path(const char *item_id, char *out, size_t out_size)
 {
-    snprintf(out, out_size, "%s/%s", COVER_DIR, item_id);
+    char safe[ABS_MAX_ID];
+    abs_sanitize_component(item_id, safe, sizeof safe);
+    snprintf(out, out_size, "%s/%s", COVER_DIR, safe);
 }
 
 /* ------------------------------------------------------------ disk cache -- */
@@ -179,6 +189,17 @@ static ibitmap *decode_to_bitmap(const unsigned char *bytes, size_t len,
                                                &channels, 3);
     if (img == NULL) return NULL;
 
+    /*
+     * Refuse absurd dimensions. Book covers are hundreds of pixels; stb will
+     * accept up to 1<<24, and the scaler's `x * sw` is int arithmetic that
+     * would overflow long before that.
+     */
+    if (sw <= 0 || sh <= 0 || sw > COVER_MAX_DIM || sh > COVER_MAX_DIM) {
+        abs_log("cover rejected: %dx%d", sw, sh);
+        stbi_image_free(img);
+        return NULL;
+    }
+
     /* Fit inside the box without distorting the cover. */
     int dw = max_w;
     int dh = (int)((long long)sh * dw / sw);
@@ -278,7 +299,7 @@ int abs_cover_save_beside(const abs_config *cfg, const char *item_id,
         if (abs_url_item_cover(cfg, item_id, url, sizeof url) == 0) return 0;
 
         abs_http_response res;
-        if (!abs_http_get_auth(cfg, url, NULL, &res, COVER_MAX_BYTES)) return 0;
+        if (!abs_http_get(cfg, url, &res, COVER_MAX_BYTES)) return 0;
         if (res.status != 200 || res.len == 0) { abs_http_free(&res); return 0; }
 
         len = res.len;
@@ -337,8 +358,7 @@ ibitmap *abs_cover_get(const abs_config *cfg, const char *item_id,
         if (abs_url_item_cover(cfg, item_id, url, sizeof url) == 0) return NULL;
 
         abs_http_response res;
-        /* The cover URL carries ?token=, so no bearer header is needed. */
-        if (!abs_http_get_auth(cfg, url, NULL, &res, COVER_MAX_BYTES)) {
+        if (!abs_http_get(cfg, url, &res, COVER_MAX_BYTES)) {
             abs_log("cover fetch failed: %s", res.error);
             return NULL;
         }

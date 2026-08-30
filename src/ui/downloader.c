@@ -17,6 +17,7 @@ static abs_dl_status status;
 
 static CURLM  *multi;
 static CURL   *easy;
+static struct curl_slist *easy_headers;
 static FILE   *out_file;
 static char    part_path[ABS_MAX_DIR + ABS_MAX_NAME + 16];
 static char    final_path[ABS_MAX_DIR + ABS_MAX_NAME + 8];
@@ -47,6 +48,8 @@ long long abs_dl_free_space(void)
 static int make_dirs(const char *path)
 {
     char tmp[ABS_MAX_DIR];
+
+    if (path == NULL || path[0] == '\0') return 0;
     snprintf(tmp, sizeof tmp, "%s", path);
 
     for (char *p = tmp + 1; *p != '\0'; p++) {
@@ -83,6 +86,10 @@ static void cleanup_transfer(void)
         if (multi != NULL) curl_multi_remove_handle(multi, easy);
         curl_easy_cleanup(easy);
         easy = NULL;
+    }
+    if (easy_headers != NULL) {
+        curl_slist_free_all(easy_headers);
+        easy_headers = NULL;
     }
     if (out_file != NULL) {
         fclose(out_file);
@@ -185,6 +192,19 @@ static int start_track(int index)
         return 0;
     }
 
+    /* Authenticate with a header rather than ?token= in the URL: a token in a
+     * query string is logged by us, by the server, and by anything between. */
+    char auth[ABS_MAX_TOKEN + 64];
+    if (abs_auth_header_token(dl_cfg.token, auth, sizeof auth) > 0) {
+        struct curl_slist *appended = curl_slist_append(easy_headers, auth);
+        if (appended == NULL) {
+            finish(DL_FAILED, "Out of memory starting the transfer.");
+            return 0;
+        }
+        easy_headers = appended;
+        curl_easy_setopt(easy, CURLOPT_HTTPHEADER, easy_headers);
+    }
+
     curl_easy_setopt(easy, CURLOPT_URL, url);
     curl_easy_setopt(easy, CURLOPT_WRITEFUNCTION, write_cb);
     curl_easy_setopt(easy, CURLOPT_FOLLOWLOCATION, 1L);
@@ -196,6 +216,17 @@ static int start_track(int index)
      * 60s means the connection is gone. No overall timeout -- these are big. */
     curl_easy_setopt(easy, CURLOPT_LOW_SPEED_LIMIT, 1024L);
     curl_easy_setopt(easy, CURLOPT_LOW_SPEED_TIME, 60L);
+
+    /*
+     * Cap the transfer. The free-space precheck trusts sizes the server
+     * declared, so a server that under-reports could otherwise stream until
+     * the card is full -- with sleep held off the whole time. Generous margin,
+     * since the declared size can legitimately be a little off.
+     */
+    if (t->size > 0) {
+        curl_off_t cap = (curl_off_t)(t->size + t->size / 4 + (16 * 1024 * 1024));
+        curl_easy_setopt(easy, CURLOPT_MAXFILESIZE_LARGE, cap);
+    }
 
     if (resume_from > 0) {
         curl_easy_setopt(easy, CURLOPT_RESUME_FROM_LARGE, (curl_off_t)resume_from);

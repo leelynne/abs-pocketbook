@@ -129,7 +129,8 @@ static int http_request(const abs_config *cfg, const char *url, const char *body
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
     }
 
-    abs_log("%s %s", method ? method : (body ? "POST" : "GET"), url);
+    abs_log("%s %s", method ? method : (body ? "POST" : "GET"),
+            abs_log_redact_url(url));
     CURLcode rc = curl_easy_perform(curl);
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &res->status);
 

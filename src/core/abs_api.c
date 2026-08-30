@@ -32,8 +32,8 @@ size_t abs_url_libraries(const abs_config *cfg, char *out, size_t out_size)
 size_t abs_url_item_cover(const abs_config *cfg, const char *item_id,
                           char *out, size_t out_size)
 {
-    return write_url(out, out_size, "%s/api/items/%s/cover?token=%s",
-                     cfg->server, item_id, cfg->token);
+    return write_url(out, out_size, "%s/api/items/%s/cover",
+                     cfg->server, item_id);
 }
 
 size_t abs_auth_header_token(const char *token, char *out, size_t out_size)
@@ -127,6 +127,9 @@ static size_t render_body(cJSON *obj, char *out, size_t out_size)
         } else if (out_size > 0) {
             out[0] = '\0';
         }
+        /* This buffer may hold the user's password: cJSON frees it without
+         * clearing, leaving it readable in the heap. */
+        memset(text, 0, len);
         cJSON_free(text);
     }
 
@@ -178,6 +181,12 @@ int abs_parse_login(const char *json, char *token_out, size_t token_size,
 
     cJSON *root = cJSON_Parse(json);
     if (root == NULL) return 0;
+
+    if (token_out == NULL || token_size == 0 ||
+        user_id_out == NULL || user_id_size == 0) {
+        cJSON_Delete(root);
+        return 0;
+    }
 
     const cJSON *user = cJSON_GetObjectItemCaseSensitive(root, "user");
     if (!cJSON_IsObject(user)) {
@@ -268,14 +277,26 @@ size_t abs_url_item(const abs_config *cfg, const char *item_id,
 size_t abs_url_track_download(const abs_config *cfg, const char *item_id,
                               const char *ino, char *out, size_t out_size)
 {
-    return write_url(out, out_size, "%s/api/items/%s/file/%s/download?token=%s",
-                     cfg->server, item_id, ino, cfg->token);
+    return write_url(out, out_size, "%s/api/items/%s/file/%s/download",
+                     cfg->server, item_id, ino);
 }
+
+/*
+ * A number from the server, clamped to something that survives a cast.
+ *
+ * Values like 1e30 make a double-to-int conversion undefined, and a negative
+ * total size would slip past the download free-space check.
+ */
+#define ABS_NUMBER_MAX 1.0e12
 
 static double number_field(const cJSON *obj, const char *key)
 {
     const cJSON *item = cJSON_GetObjectItemCaseSensitive(obj, key);
-    return cJSON_IsNumber(item) ? item->valuedouble : 0.0;
+    if (!cJSON_IsNumber(item)) return 0.0;
+
+    double v = item->valuedouble;
+    if (!(v > 0.0)) return 0.0;                    /* also catches NaN */
+    return (v > ABS_NUMBER_MAX) ? ABS_NUMBER_MAX : v;
 }
 
 /*
@@ -347,6 +368,28 @@ size_t abs_url_encode(const char *in, char *out, size_t out_size)
 
     out[w] = '\0';
     return w;
+}
+
+void abs_redact_token(const char *url, char *out, size_t out_size)
+{
+    if (out == NULL || out_size == 0) return;
+    if (url == NULL) { snprintf(out, out_size, "%s", "(null)"); return; }
+
+    const char *tok = strstr(url, "token=");
+    if (tok == NULL) {
+        snprintf(out, out_size, "%s", url);
+        return;
+    }
+
+    size_t keep = (size_t)(tok - url) + 6;      /* through "token=" */
+    if (keep >= out_size) keep = out_size - 1;
+
+    memcpy(out, url, keep);
+    out[keep] = '\0';
+
+    /* Preserve anything after the token value so the rest still reads. */
+    const char *rest = strchr(tok, '&');
+    snprintf(out + keep, out_size - keep, "REDACTED%s", rest ? rest : "");
 }
 
 size_t abs_url_search(const abs_config *cfg, const char *library_id,
