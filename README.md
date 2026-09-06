@@ -93,11 +93,15 @@ Requires Docker. The PocketBook toolchain is x86_64 Linux, so on Apple Silicon i
 under emulation inside a container — nothing is installed on the host.
 
 ```bash
-./scripts/setup-sdk.sh    # one-time: fetch and unpack the SDK into sdk/ (~1.3 GB)
 ./scripts/build.sh        # cross-compile -> build/ABSClient.app
 ./scripts/deploy.sh       # copy to a PocketBook mounted over USB
 ./scripts/release.sh      # verified, stripped binary -> release/ABSClient.app
 ```
+
+The first build pulls the toolchain image CI uses (~1.7 GB, once). That keeps local
+builds and CI on an identical toolchain. If you would rather hold the SDK locally --
+for offline builds, or to modify it -- run `./scripts/setup-sdk.sh` and it will be
+preferred automatically.
 
 `release.sh` refuses to produce a binary from a dirty tree or failing tests, and checks
 the result before handing it over: correct ARM ABI, expected libraries, SQLite linked

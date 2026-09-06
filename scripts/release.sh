@@ -13,6 +13,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
+. "$REPO_ROOT/scripts/sdk-env.sh"
 
 APP_NAME="ABSClient.app"
 OUT="release/$APP_NAME"
@@ -51,12 +52,8 @@ echo "==> Building"
 
 # --- 4. verification gates --------------------------------------------------
 # Everything below runs inside the SDK container, which has the ARM binutils.
-SDK="$REPO_ROOT/sdk/SDK-B288"
 run_in_sdk() {
-    docker run --rm --platform linux/amd64 \
-        -v "$REPO_ROOT:/work" -v "$SDK:/SDK:ro" \
-        -e LD_LIBRARY_PATH=/SDK/usr/lib -w /work \
-        abs-pocketbook-build sh -c "$1"
+    ${ABS_SDK_RUN[@]+"${ABS_SDK_RUN[@]}"} sh -c "$1"
 }
 
 echo "==> Verifying"

@@ -2,8 +2,19 @@ version: 2
 updates:
   # Actions are pinned to commit SHAs; Dependabot keeps them current without
   # giving up the pinning.
+  #
+  # Weekly, not monthly: GitHub retires action runtimes and service APIs on
+  # its own schedule, and a monthly cadence let a hard deprecation break the
+  # nightly run for five nights before anyone noticed.
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
-      interval: monthly
-    open-pull-requests-limit: 5
+      interval: weekly
+    # Above the number of actions we use, so an update is never silently
+    # withheld -- the old limit of 5 hid the download-artifact bump entirely.
+    open-pull-requests-limit: 10
+    groups:
+      # One PR for the lot. Individually they are noise nobody merges, which
+      # is how the cache deprecation sat unattended.
+      actions:
+        patterns: ["*"]

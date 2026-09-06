@@ -15,14 +15,17 @@ to the server.
 ## Build and deploy
 
 ```bash
-./scripts/setup-sdk.sh     # one-time, ~1.3 GB
 ./scripts/build.sh         # cross-compile in a linux/amd64 container
 ./scripts/deploy.sh        # copy to a mounted PocketBook
 make test                  # host-side tests, no SDK or device needed
 ```
 
-The toolchain is x86_64 Linux and runs under emulation on Apple Silicon. `sdk/` is
-gitignored and reproducible from the script.
+The toolchain is x86_64 Linux and runs under emulation on Apple Silicon. By default
+builds use `ghcr.io/leelynne/pocketbook-sdk`, the same image CI uses, so the two cannot
+drift; `scripts/setup-sdk.sh` fetches a local SDK instead if you want one, and
+`scripts/sdk-env.sh` prefers it when the compiler is actually present. Both scripts
+source that one file, so the container invocation exists in a single place -- they had
+already drifted once.
 
 **Every build stamps the commit into the binary and shows it on screen** (`build 016647f`,
 in the book list footer). This exists because two deploys in a row silently failed to
